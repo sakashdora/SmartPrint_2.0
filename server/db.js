@@ -1,6 +1,29 @@
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import dns from 'node:dns';
+import { Resolver } from 'node:dns/promises';
 import pg from 'pg';
+
+// Setup resilient DNS resolution for remote database hosts (e.g. Neon)
+// When local/ISP DNS fails or refuses lookups, fallback to public DNS (Cloudflare & Google)
+const origLookup = dns.lookup;
+let publicResolver;
+dns.lookup = (hostname, options, callback) => {
+  if (typeof options === 'function') { callback = options; options = {}; }
+  origLookup(hostname, options, (err, address, family) => {
+    if (!err) return callback(null, address, family);
+    if (hostname && (hostname.includes('neon.tech') || hostname.includes('supabase.co') || hostname.includes('amazonaws.com'))) {
+      publicResolver ??= new Resolver();
+      try { publicResolver.setServers(['8.8.8.8', '1.1.1.1']); } catch {}
+      publicResolver.resolve4(hostname).then(
+        ips => options?.all ? callback(null, ips.map(ip => ({ address: ip, family: 4 }))) : callback(null, ips[0], 4),
+        () => callback(err, address, family)
+      );
+    } else {
+      callback(err, address, family);
+    }
+  });
+};
 import { schema } from './schema.js';
 const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events|institution_settings|campuses|departments|edu_profiles|queue_classes|wallet_accounts|wallet_balances|ledger_entries|wallet_holds|offline_reservations|offline_sync_log|reconciliation_cases|offline_staff_pins|pool_departments|alerts|webhook_endpoints|webhook_deliveries|payment_settings|payment_intents|gateway_events|refunds_v2';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
