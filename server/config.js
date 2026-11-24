@@ -14,13 +14,15 @@ export function configuration() {
       rawUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
     } else if (process.env.RAILWAY_STATIC_URL) {
       rawUrl = `https://${process.env.RAILWAY_STATIC_URL}`;
+    } else if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+      rawUrl = `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
     } else if (process.env.VERCEL_URL) {
       rawUrl = `https://${process.env.VERCEL_URL}`;
     }
   }
 
   if (!rawUrl) {
-    const defaultHost = process.env.RENDER_EXTERNAL_HOSTNAME || process.env.KOYEB_PUBLIC_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || process.env.VERCEL_URL;
+    const defaultHost = process.env.RENDER_EXTERNAL_HOSTNAME || process.env.KOYEB_PUBLIC_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
     rawUrl = production ? (defaultHost ? `https://${defaultHost}` : (process.env.RENDER_EXTERNAL_URL || 'https://smartprint.onrender.com')) : 'http://localhost:3000';
   }
 

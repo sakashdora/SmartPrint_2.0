@@ -1,7 +1,18 @@
 import { selectedPages } from './print-options.js';
 export { validateOptions, selectedPages, price } from './print-options.js';
 import { PDFDocument } from 'pdf-lib';
-import sharp from 'sharp';
+
+let sharpModule = null;
+async function getSharp() {
+  if (!sharpModule) {
+    try {
+      sharpModule = (await import('sharp')).default;
+    } catch {
+      throw new Error('Image processing is not supported directly in this serverless environment without sharp. Configure PROCESSOR_URL or upload a PDF.');
+    }
+  }
+  return sharpModule;
+}
 
 export async function prepare(files, options) {
   if (!Array.isArray(files) || files.length < 1 || files.length > 2) throw new Error('Upload one PDF/image, or two images for a card pair.');
@@ -25,6 +36,7 @@ export async function prepare(files, options) {
       const png = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
       const jpg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
       if (!png && !jpg) throw new Error('Supported files are PDF, JPG and PNG.');
+      const sharp = await getSharp();
       let pipeline = sharp(bytes, { limitInputPixels: 40_000_000 }).rotate();
       if (options.smartCrop) pipeline = pipeline.trim({ threshold: 12 });
       if (options.crop) {

@@ -107,7 +107,7 @@ export async function createApp({ database, seed = true } = {}) {
         if (process.env.PUBLIC_BASE_URL) {
           try { allowed.add(new URL(process.env.PUBLIC_BASE_URL).origin); } catch {}
         }
-        for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL']) {
+        for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL', 'VERCEL_PROJECT_PRODUCTION_URL']) {
           if (process.env[hostVar]) allowed.add(`https://${process.env[hostVar]}`);
         }
         if (!allowed.has(origin)) return next(fail(403, 'Request origin is not allowed.'));
@@ -720,7 +720,12 @@ export async function createApp({ database, seed = true } = {}) {
     res.status(status).json({ error: status === 500 ? 'Something went wrong. Please try again.' : error.message, ...(status < 500 && /^[a-z]+\.[a-z_]+$/.test(String(error.code ?? '')) ? { code: error.code } : {}) });
   });
   const timer = setInterval(() => { maintain().catch(() => console.error('Maintenance failed; check database and cleanup alerts.')); }, 60000);
-  timer.unref(); await maintain();
+  timer.unref();
+  if (process.env.VERCEL) {
+    maintain().catch(error => console.warn('[SmartPrint] Initial serverless maintenance sweep deferred:', error.message));
+  } else {
+    await maintain();
+  }
   return { app, db, cleanup, close: async () => { clearInterval(timer); await db.close(); } };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

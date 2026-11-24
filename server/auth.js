@@ -62,7 +62,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     if (process.env.PUBLIC_BASE_URL) {
       try { origins.add(new URL(process.env.PUBLIC_BASE_URL).origin); } catch {}
     }
-    for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL']) {
+    for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL', 'VERCEL_PROJECT_PRODUCTION_URL']) {
       if (process.env[hostVar]) origins.add(`https://${process.env[hostVar]}`);
     }
     if (!config.production) {

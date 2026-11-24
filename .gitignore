@@ -17,3 +17,7 @@ connector/*.xml
 Thumbs.db
 .vscode/
 .idea/
+
+# Documents & Presentations
+*.docx
+*.pptx
