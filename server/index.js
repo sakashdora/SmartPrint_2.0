@@ -107,8 +107,11 @@ export async function createApp({ database, seed = true } = {}) {
         if (process.env.PUBLIC_BASE_URL) {
           try { allowed.add(new URL(process.env.PUBLIC_BASE_URL).origin); } catch {}
         }
-        for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL', 'VERCEL_PROJECT_PRODUCTION_URL']) {
+        for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL', 'VERCEL_PROJECT_PRODUCTION_URL', 'CF_PAGES_URL']) {
           if (process.env[hostVar]) allowed.add(`https://${process.env[hostVar]}`);
+        }
+        if (process.env.CLOUDFLARE_TUNNEL_URL) {
+          try { allowed.add(new URL(process.env.CLOUDFLARE_TUNNEL_URL).origin); } catch {}
         }
         if (!allowed.has(origin)) return next(fail(403, 'Request origin is not allowed.'));
       }
@@ -140,11 +143,12 @@ export async function createApp({ database, seed = true } = {}) {
         }
       }
     }
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && !req.path.startsWith('/api/v2/payments/webhook/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
+    const clientIp = req.headers['cf-connecting-ip'] || req.ip;
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && !req.path.startsWith('/api/v2/payments/webhook/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', clientIp, 120);
     // Institution users share campus network addresses, so their writes are limited per person instead of per address.
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/v2/edu/') && req.user) await limitRate(db, 'edu-mutations', req.user.id, 240);
-    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 60, 900);
-    if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', req.ip, 40, 900);
+    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', clientIp, 60, 900);
+    if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', clientIp, 40, 900);
     next();
   });
   const requireRole = role => (req, res, next) => !req.user ? next(fail(401, 'Please sign in.')) : req.user.mfaRequired ? next(fail(403, 'Set up your authenticator before using this workspace.')) : req.user.role !== role ? next(fail(403, 'This action is not available for your account.')) : next();
