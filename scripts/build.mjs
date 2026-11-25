@@ -5,4 +5,4 @@ await mkdir('public/vendor', { recursive: true });
 await cp('node_modules/pdfjs-dist/build', 'public/vendor/pdfjs', { recursive: true });
 await cp('node_modules/pdfjs-dist/standard_fonts', 'public/vendor/pdfjs-fonts', { recursive: true });
 await cp('node_modules/pdfjs-dist/wasm', 'public/vendor/pdfjs-wasm', { recursive: true });
-console.log('Vercel static assets prepared.');
+console.log('Static vendor assets prepared.');

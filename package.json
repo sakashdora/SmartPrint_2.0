@@ -15,8 +15,7 @@
     "demo": "node server/index.js",
     "test:neon": "node --env-file-if-exists=.env scripts/neon-integration.mjs",
     "env:check": "node --env-file-if-exists=.env scripts/env-status.mjs",
-    "account:recover": "node --env-file-if-exists=.env scripts/recover-account.mjs",
-    "cloudflare": "powershell -ExecutionPolicy Bypass -File scripts/cloudflare-tunnel.ps1"
+    "account:recover": "node --env-file-if-exists=.env scripts/recover-account.mjs"
   },
   "engines": {
     "node": "24.x"

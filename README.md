@@ -80,12 +80,6 @@ On the Windows PC connected to your printer:
 start-connector.bat
 ```
 
-Or expose a local instance directly over HTTPS via Cloudflare Tunnel:
-
-```cmd
-start-cloudflare.bat
-```
-
 ---
 
 ## Verification & Maintenance
