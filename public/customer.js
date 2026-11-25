@@ -219,31 +219,32 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       <!-- SUPPORT & HELP SECTION -->
       <section class="home-why-section" id="support">
         <div class="home-container">
-          <div class="why-choose-card">
-            <div class="why-choose-header">
-              <span class="eyebrow" style="color: #2563EB;">HELP & SUPPORT</span>
-              <h2 class="why-choose-title">Need help with your print order?</h2>
-              <p class="why-choose-sub">Fast answers for customers and print shop partners.</p>
+          <div class="why-choose-card support-shell">
+            <div class="support-header">
+              <span class="support-eyebrow">HELP &amp; SUPPORT</span>
+              <h2 class="support-title">Need help with your print order?</h2>
+              <p class="support-sub">Fast answers for customers and print shop partners.</p>
             </div>
-            <div class="why-features-grid">
-              <div class="feature-item">
-                <div class="feature-icon-box" style="background:#EFF6FF; color:#2563EB;">${icon('file')}</div>
-                <h4 class="feature-title">Supported Documents</h4>
-                <p class="feature-desc">Upload PDF documents or camera images (JPG/PNG). Multi-page and ID cards supported up to 20 MB.</p>
-              </div>
-              <div class="feature-item">
-                <div class="feature-icon-box" style="background:#F0FDF4; color:#16A34A;">${icon('shield')}</div>
-                <h4 class="feature-title">End-to-End Privacy</h4>
-                <p class="feature-desc">All files are encrypted in flight and at rest with AES-256-GCM. Files are auto-purged after printing.</p>
-              </div>
-              <div class="feature-item">
-                <div class="feature-icon-box" style="background:#FEF3C7; color:#D97706;">${icon('shop')}</div>
-                <h4 class="feature-title">Flexible Shop Payments</h4>
-                <p class="feature-desc">Pay directly at the counter with UPI QR or cash once your document is ready for collection.</p>
-              </div>
+            <div class="support-grid">
+              <article class="support-card">
+                <div class="support-icon blue">${icon('file')}</div>
+                <h3 class="support-card-title">Supported Documents</h3>
+                <p class="support-card-desc">Upload PDF documents or camera images (JPG/PNG). Multi-page and ID cards supported up to 20 MB.</p>
+              </article>
+              <article class="support-card">
+                <div class="support-icon green">${icon('shield')}</div>
+                <h3 class="support-card-title">End-to-End Privacy</h3>
+                <p class="support-card-desc">All files are encrypted in flight and at rest with AES-256-GCM. Files are auto-purged after printing.</p>
+              </article>
+              <article class="support-card">
+                <div class="support-icon amber">${icon('shop')}</div>
+                <h3 class="support-card-title">Flexible Shop Payments</h3>
+                <p class="support-card-desc">Pay online via Razorpay/UPI or directly at the counter with UPI QR or cash when your print is ready.</p>
+              </article>
             </div>
-            <div style="text-align: center; margin-top: 24px;">
-              <p class="muted">Have questions or want to partner your shop with SmartPrint? <a href="#register" class="primary" style="font-weight:600;">Register your shop →</a></p>
+            <div class="support-footer">
+              <p class="support-footer-text">Have questions or want to partner your shop with SmartPrint?</p>
+              <a href="#register" class="support-cta-btn">Register your shop &rarr;</a>
             </div>
           </div>
         </div>
