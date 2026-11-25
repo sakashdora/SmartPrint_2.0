@@ -115,7 +115,11 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
             ['sessions', 'last_seen', 'TEXT'],
             ['sessions', 'user_agent', 'TEXT'],
             ['sessions', 'created', 'TEXT'],
-            ['devices', 'cap_source', 'TEXT']
+            ['devices', 'cap_source', 'TEXT'],
+            ['devices', 'health', 'TEXT'],
+            ['devices', 'health_detail', 'TEXT'],
+            ['devices', 'health_checked', 'TEXT'],
+            ['devices', 'health_source', 'TEXT']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -186,6 +190,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN created TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN cap_source TEXT;"); } catch {}
+      for (const column of ['health', 'health_detail', 'health_checked', 'health_source']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} TEXT;`); } catch {} }
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

@@ -161,6 +161,12 @@ export const migrations = [
     description: 'Shop printers remember whether colour/two-sided were set by the owner (manual) or read from the driver',
     async up(tx) { await tx.query('SELECT cap_source FROM devices LIMIT 1'); }
   }
+  ,
+  {
+    id: '0019_printer_health',
+    description: 'Printers store the last health state Windows reported (state, detail, time, source) apart from the connector heartbeat',
+    async up(tx) { await tx.query('SELECT health, health_detail, health_checked, health_source FROM devices LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();

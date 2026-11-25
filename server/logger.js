@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { clientIp } from './security.js';
 
 const SENSITIVE_KEYS = new Set([
   'password', 'token', 'secret', 'key', 'razorpay_signature',
@@ -61,7 +62,7 @@ export function requestLogger(req, res, next) {
         path: req.path,
         status: res.statusCode,
         latencyMs,
-        ip: req.ip
+        ip: clientIp(req)
       });
     }
   });

@@ -9,6 +9,7 @@ import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
 import { classifyConnection, guessCapabilities } from './printer-capabilities.js';
 import { createNotification } from './notifications.js';
+import { printerSupports, evaluateDevice, classifyPrinterHealth } from './printer-health.js';
 
 const runExec = promisify(execFile);
 const now = () => new Date().toISOString();
@@ -90,11 +91,7 @@ export function formatPrinterList(rawList) {
     });
 }
 
-// A colour job needs a colour-capable printer and a two-sided job a duplex printer. Black & white and
-// one-sided jobs run on any printer. Unknown capability is stored as 0, so it never qualifies.
-export function printerSupports(device, options) {
-  return (options.color !== 'color' || Number(device?.color) === 1) && (!options.duplex || Number(device?.duplex) === 1);
-}
+export { printerSupports };
 
 const alertedOrders = new Set();
 // Tells the owner once per order when no online printer can take a queued job, instead of the job
@@ -326,14 +323,16 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
-    res.json(rows.map(({ paused, paused_note, ...d }) => {
-      // Same 3-minute window the dashboard and job routing use.
-      const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000));
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,health,health_detail,health_checked,health_source FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    res.json(rows.map(row => {
+      const { paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, ...d } = row;
+      const health = evaluateDevice(row);
       return {
         ...d,
         is_paused: Number(paused) ? 1 : 0,
-        status_note: Number(paused) ? (paused_note || 'Paused by owner') : isOnline ? 'Ready' : 'Offline · connector not running'
+        health,
+        // Never "Ready" just because the connector is alive: the note says what is actually known.
+        status_note: health.connector_online || !d.active ? health.label + (health.detail ? ` (${health.detail})` : '') : 'Offline · connector not running'
       };
     }));
   });
@@ -571,6 +570,23 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (capabilities && typeof capabilities.color === 'boolean' && typeof capabilities.duplex === 'boolean') {
       await db.query("UPDATE devices SET color=$1, duplex=$2 WHERE id=$3 AND COALESCE(cap_source,'driver')<>'manual'", [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
     }
+    // What Windows says the printer itself is doing. The server classifies the raw spooler status itself, so a
+    // connector (or anything holding its key) cannot invent a state name; "code: null" means Windows could not say.
+    if (req.body.health && typeof req.body.health === 'object') {
+      const verdict = classifyPrinterHealth(req.body.health.code ?? null);
+      const [before] = await db.query('SELECT health FROM devices WHERE id=$1', [req.device.id]);
+      await db.query('UPDATE devices SET health=$1, health_detail=$2, health_checked=$3, health_source=$4 WHERE id=$5', [verdict.state, verdict.flags.join(', ').slice(0, 200) || null, now(), 'windows-spooler', req.device.id]);
+      // One notification per change into a problem, not one per scan.
+      if (verdict.blocking && before?.health !== verdict.state) {
+        await createNotification(db, {
+          shopId: req.device.shop_id,
+          eventType: 'printer.problem',
+          title: `${req.device.name}: ${verdict.label}`,
+          body: `Windows reports this printer as "${verdict.label}". New orders will wait until it is fixed, and online payment is paused for shops with no other ready printer.`,
+          data: { deviceId: req.device.id, state: verdict.state }
+        }).catch(() => {});
+      }
+    }
     res.json({ ok: true, count: list.length });
   });
   app.post('/api/device/preparations/claim', async (req, res) => {
@@ -626,8 +642,11 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const result = await db.transaction(async tx => {
       // Serialize claims from duplicated connector processes using the same credential, and read the
       // device's capabilities under that lock so a capability report mid-request is respected.
-      const [device] = await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id, color, duplex, paused', [now(), req.device.id]);
+      const [device] = await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING *', [now(), req.device.id]);
       if (Number(device.paused)) return null;
+      // A printer Windows reports as jammed, out of paper, offline, ... is not offered work: the job stays queued
+      // (and paid) instead of being sent to a printer that cannot print it.
+      if (!evaluateDevice(device).claimable) return null;
       const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]);
       if (existing) return null;
       const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);

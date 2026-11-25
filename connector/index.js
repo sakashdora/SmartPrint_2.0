@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus, clearStaleConnectorJobs } from './sumatra-helper.js';
 import { probePrinterCapabilities, classifyConnection, guessCapabilities } from '../server/printer-capabilities.js';
 import { startBridge, BRIDGE_PORT } from './local-bridge.js';
+import { classifyPrinterHealth } from '../server/printer-health.js';
 
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
@@ -171,10 +172,17 @@ async function collectLocalPrinters({ maxAge = 15000 } = {}) {
   return printers;
 }
 
+// What Windows last said about the printer this connector prints to ({ blocking, label, at }), or null when it could not
+// be read. The claim loop below does not ask the server for work while this shows a fault.
+let ownHealth = null;
 async function scanAndReportLocalPrinters() {
   if (process.platform !== 'win32' || !secret || authFailed) return;
   try {
     const rawWindows = await getWindowsPrinters();
+    const ownRaw = printer ? rawWindows.find(p => p?.Name && p.Name.toLowerCase() === String(printer).toLowerCase()) : null;
+    const reportedCode = ownRaw ? (ownRaw.PrinterStatus ?? null) : null; // null = Windows could not tell us
+    const verdict = classifyPrinterHealth(reportedCode);
+    ownHealth = { blocking: verdict.blocking, label: verdict.label, state: verdict.state, at: Date.now() };
     const printers = [];
 
     if (rawWindows.length) {
@@ -250,9 +258,8 @@ async function scanAndReportLocalPrinters() {
     const capabilities = await probePrinterCapabilities([printer, ...printers.map(p => p.name)]);
     for (const p of printers) Object.assign(p, capabilities.get(p.name) || {});
     const own = capabilities.get(printer);
-    if (printers.length || own) {
-      await request('/api/device/printers/scanned', { method: 'POST', body: { printers, ...(own ? { capabilities: own } : {}) } }).catch(() => {});
-    }
+    // Always report: even when no printer list could be read, "Windows could not tell us" is itself the honest answer.
+    await request('/api/device/printers/scanned', { method: 'POST', body: { printers, health: { code: reportedCode }, ...(own ? { capabilities: own } : {}) } }).catch(() => {});
   } catch {}
 }
 
@@ -509,6 +516,13 @@ let lastClaimErrorLog = 0;
 while (running) {
   // Unlinked or rejected: wait for the dashboard to link this PC instead of polling with a bad key.
   if (!secret || authFailed) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+  // The printer reported a jam, empty tray, open cover, offline state ... in the last two minutes: leave paid jobs
+  // queued instead of claiming one that cannot print. The next scan (every minute) lifts this once it is fixed.
+  if (ownHealth?.blocking && Date.now() - ownHealth.at < 120000) {
+    if (Date.now() - lastClaimErrorLog > 60000) { log(`[Printer] Not taking jobs: "${printer}" reports "${ownHealth.label}". Fix it and jobs will resume.`); lastClaimErrorLog = Date.now(); }
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    continue;
+  }
   try {
     // Claim print jobs
     const print = await request('/api/device/claim', { method: 'POST' });

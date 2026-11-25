@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { randomBytes, scrypt, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -57,6 +58,19 @@ export function totpStep(secret, code, lastStep = -1) {
   return null;
 }
 export function base32(bytes) { let bits = 0, value = 0, result = ''; for (const byte of bytes) { value = (value << 8) | byte; bits += 8; while (bits >= 5) { result += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[(value >>> (bits -= 5)) & 31]; } } if (bits) result += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[(value << (5 - bits)) & 31]; return result; }
+// The address a request really came from, for rate limits and logs. Cloudflare puts the visitor's address in
+// CF-Connecting-IP, but anyone who can reach the server directly can send that header too, which would let an
+// attacker dodge every per-address limit (including the sign-in limit) by changing it on each request. So the header
+// is believed only when the connection comes from this same computer (a cloudflared tunnel) or the operator has
+// said the server is reachable only through Cloudflare (TRUST_CF_CONNECTING_IP=true). Otherwise Express's own
+// answer is used (which honours X-Forwarded-For only for the proxy hops configured with "trust proxy").
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+export function clientIp(req) {
+  const claimed = String(req.headers?.['cf-connecting-ip'] ?? '').trim();
+  if (claimed && isIP(claimed) && (process.env.TRUST_CF_CONNECTING_IP === 'true' || LOOPBACK.has(String(req.socket?.remoteAddress ?? '')))) return claimed;
+  return req.ip;
+}
+
 export async function limitRate(db, scope, identity, max, seconds = 60) {
   const id = digest(`${scope}:${identity}`), now = new Date().toISOString(), expires = new Date(Date.now() + seconds * 1000).toISOString();
   const [row] = await db.query('INSERT INTO rate_limits (id,count,expires) VALUES ($1,1,$2) ON CONFLICT(id) DO UPDATE SET count=CASE WHEN rate_limits.expires<$3 THEN 1 ELSE rate_limits.count+1 END, expires=CASE WHEN rate_limits.expires<$3 THEN $2 ELSE rate_limits.expires END RETURNING count', [id, expires, now]);

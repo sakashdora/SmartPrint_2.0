@@ -61,7 +61,9 @@ test('connecting a printer issues a fresh key and never shows it online before i
 
   assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.token })).status, 200);
   [device] = (await request('/api/owner/devices', { cookie: owner })).body;
-  assert.equal(device.status_note, 'Ready');
+  // A live connector proves nothing about the printer itself: the card says so instead of claiming "Ready".
+  assert.match(device.status_note, /printer status not reported/);
+  assert.equal(device.health.verified, false);
   assert.equal((await request(`/api/owner/devices/${device.id}/test-print`, { method: 'POST', cookie: owner })).status, 200);
 
   // Connecting again: the running connector keeps its key until a connector uses the new one.

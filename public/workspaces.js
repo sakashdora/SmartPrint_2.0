@@ -123,9 +123,9 @@ export async function printersPage({ api, workspace, escape, notify }) {
             <span class="live-dot ${online ? (d.is_paused ? 'dot-paused' : 'dot-online') : 'dot-offline'}"></span>
             <strong>${escape(d.name)}</strong>
           </div>
-          <span class="badge ${!d.active ? 'cancelled' : d.is_paused ? 'pending' : online ? 'active' : 'pending'}">${!d.active ? 'Disconnected' : d.is_paused ? 'Paused' : online ? 'Online & ready' : 'Offline'}</span>
+          <span class="badge ${!d.active ? 'cancelled' : d.is_paused ? 'pending' : online ? (d.health?.blocking ? 'cancelled' : d.health?.verified ? 'active' : 'pending') : 'pending'}">${!d.active ? 'Disconnected' : d.is_paused ? 'Paused' : online ? (d.health?.blocking ? 'Needs attention' : d.health?.verified ? 'Online & ready' : 'Connected · status unverified') : 'Offline'}</span>
         </div>
-        <p class="muted small">${online ? escape(d.status_note || 'Ready') : d.active ? (d.heartbeat ? `Offline since ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on its PC, or click Connect above.` : 'Waiting for the connector to check in.') : 'Disconnected'}</p>
+        <p class="muted small">${online ? escape(d.status_note || 'Connector online · printer status not reported') + (d.health?.checked_at ? ` · Windows status checked ${new Date(d.health.checked_at).toLocaleTimeString()}` : '') : d.active ? (d.heartbeat ? `Offline since ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on its PC, or click Connect above.` : 'Waiting for the connector to check in.') : 'Disconnected'}</p>
         ${d.active ? abilityPicker({ color: Number(d.color) === 1, duplex: Number(d.duplex) === 1, scope: 'device', id: d.id }) : `<div class="capability-tags"><span class="chip">${d.color ? 'Colour' : 'Black & white'}</span><span class="chip">${d.duplex ? 'Two-sided' : 'One-sided'}</span></div>`}
         ${d.active ? `<p class="muted small">${d.cap_source === 'manual' ? 'Set by you; scans never change it.' : 'Detected from the driver; change it if it is wrong.'}${d.cap_source === 'manual' ? ` <a href="#" data-use-detected="${d.id}">Use detected</a>` : ''}</p>` : ''}
         ${d.active ? `<div class="printer-actions">

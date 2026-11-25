@@ -4,7 +4,8 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import QRCode from 'qrcode';
 import { openDatabase } from './db.js';
-import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt, mfaPolicy } from './security.js';
+import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt, mfaPolicy, clientIp } from './security.js';
+import { evaluateDevice, shopPrinterAvailability } from './printer-health.js';
 import { price, validateOptions } from './print-options.js';
 import { configuration } from './config.js';
 import { authRoutes } from './auth.js';
@@ -143,12 +144,12 @@ export async function createApp({ database, seed = true } = {}) {
         }
       }
     }
-    const clientIp = req.headers['cf-connecting-ip'] || req.ip;
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && !req.path.startsWith('/api/v2/payments/webhook/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', clientIp, 120);
+    const callerIp = clientIp(req);
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && !req.path.startsWith('/api/v2/payments/webhook/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', callerIp, 120);
     // Institution users share campus network addresses, so their writes are limited per person instead of per address.
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/v2/edu/') && req.user) await limitRate(db, 'edu-mutations', req.user.id, 240);
-    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', clientIp, 60, 900);
-    if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', clientIp, 40, 900);
+    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', callerIp, 60, 900);
+    if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', callerIp, 40, 900);
     next();
   });
   const requireRole = role => (req, res, next) => !req.user ? next(fail(401, 'Please sign in.')) : req.user.mfaRequired ? next(fail(403, 'Set up your authenticator before using this workspace.')) : req.user.role !== role ? next(fail(403, 'This action is not available for your account.')) : next();
@@ -204,7 +205,7 @@ export async function createApp({ database, seed = true } = {}) {
     automaticPrinting: true,
     office: Boolean(process.env.PROCESSOR_URL) || process.env.CONNECTOR_PROCESSING === 'true',
     demo: !process.env.DATABASE_URL && !config.production,
-    commit: process.env.RENDER_GIT_COMMIT || '0bf8e4f',
+    commit: (process.env.RENDER_GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 7) || null,
     version: '1.0.1',
     timestamp: new Date().toISOString()
   }));
@@ -233,8 +234,11 @@ export async function createApp({ database, seed = true } = {}) {
     if (!shop) throw fail(404, 'This shop is not accepting new orders.');
     // What the shop's printers can do, so the order page only offers options the shop can actually print.
     // Counts every connected (active) printer, so a printer that is briefly offline does not hide an option.
-    const devices = await db.query('SELECT color, duplex FROM devices WHERE shop_id=$1 AND active=1', [shop.id]);
-    res.json({ ...shop, colorAvailable: devices.some(d => Number(d.color) === 1), duplexAvailable: devices.some(d => Number(d.duplex) === 1), printerCount: devices.length });
+    const devices = await db.query('SELECT * FROM devices WHERE shop_id=$1 AND active=1', [shop.id]);
+    // printersReady counts printers that are connected, not paused and not reporting a fault right now; customers only
+    // see this count (never printer names, faults or paper/toner detail).
+    const printersReady = devices.filter(d => evaluateDevice(d).claimable).length;
+    res.json({ ...shop, colorAvailable: devices.some(d => Number(d.color) === 1), duplexAvailable: devices.some(d => Number(d.duplex) === 1), printerCount: devices.length, printersReady });
   });
   class ConcurrencyQueue {
     constructor(maxConcurrent = 8, timeoutMs = 30000) {
@@ -334,6 +338,14 @@ export async function createApp({ database, seed = true } = {}) {
       const cached = await getIdempotentResult(db, idempKey, bearer(req) || req.ip, 'order.create');
       if (cached) return res.status(cached.status).json(cached.body);
     }
+    if (req.body.method === 'online') {
+      // Do not take card/UPI money for a job the shop's printers cannot print right now.
+      const [pending] = await db.query('SELECT shop_id, options FROM quotes WHERE id=$1 AND token=$2 AND used=0 AND expires>$3', [quoteId, digest(bearer(req)), now()]);
+      if (pending) {
+        const availability = await shopPrinterAvailability(db, pending.shop_id, JSON.parse(pending.options));
+        if (!availability.available) throw fail(409, availability.reason + ' Choose cash or UPI at the counter, or try again shortly. You have not been charged.');
+      }
+    }
     const receipt = token(), id = randomUUID();
     const fileName = String(req.body.fileName || 'document.pdf').slice(0, 150);
     const result = await db.transaction(async tx => {
@@ -395,6 +407,12 @@ export async function createApp({ database, seed = true } = {}) {
     if (!config.payments || !keyId || !secret) throw fail(503, 'Online payments are unavailable.');
     const [document] = await db.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
     if (!document) throw fail(409, 'The print file expired. Upload it again before paying.');
+    // A Razorpay order that already exists may still be paid (the customer was already sent to checkout), so the printer
+    // check only guards the creation of a NEW payment attempt. A paid order is never un-paid because a printer fails later.
+    if (!order.provider_order) {
+      const availability = await shopPrinterAvailability(db, order.shop_id, JSON.parse(order.options));
+      if (!availability.available) throw fail(409, availability.reason + ' Choose cash or UPI at the counter, or try again shortly. You have not been charged.');
+    }
     if (!order.provider_order) {
       // Ambiguous provider failures require reconciliation, not a blind retry.
       const marker = `creating:${randomUUID()}`;
@@ -637,8 +655,8 @@ export async function createApp({ database, seed = true } = {}) {
     res.json(rows.map(publicOrder));
   });
   app.get('/api/admin/devices', async (req, res) => {
-    const rows = await db.query('SELECT d.id, d.shop_id, d.name, d.active, d.heartbeat, d.color, d.duplex, s.name as shop_name FROM devices d JOIN shops s ON s.id=d.shop_id ORDER BY d.active DESC, d.heartbeat DESC');
-    res.json(rows);
+    const rows = await db.query('SELECT d.id, d.shop_id, d.name, d.active, d.heartbeat, d.color, d.duplex, d.paused, d.paused_note, d.health, d.health_detail, d.health_checked, d.health_source, s.name as shop_name FROM devices d JOIN shops s ON s.id=d.shop_id ORDER BY d.active DESC, d.heartbeat DESC');
+    res.json(rows.map(({ paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, ...row }) => ({ ...row, is_paused: Number(paused) ? 1 : 0, health: evaluateDevice({ ...row, paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s }) })));
   });
   app.get('/api/admin/payments', async (req, res) => {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
@@ -647,11 +665,12 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.get('/api/admin/stats', async (req, res) => {
     const today = now().slice(0, 10);
-    const [[shopCounts], [orderCounts], [transCounts], [deviceCounts], dailyOrders] = await Promise.all([
+    const [[shopCounts], [orderCounts], [transCounts], [refundTotals], deviceRows, dailyOrders] = await Promise.all([
       db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='active' THEN 1 ELSE 0 END),0) AS active, COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) AS pending, COALESCE(SUM(CASE WHEN status='suspended' THEN 1 ELSE 0 END),0) AS suspended FROM shops"),
-      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed, COALESCE(SUM(CASE WHEN status IN ('queued','printing') THEN 1 ELSE 0 END),0) AS active_jobs, COALESCE(SUM(CASE WHEN status IN ('awaiting_payment','awaiting_confirmation') THEN 1 ELSE 0 END),0) AS awaiting, COALESCE(SUM(CASE WHEN status IN ('failed','cancelled','expired') THEN 1 ELSE 0 END),0) AS failed, COALESCE(SUM(CASE WHEN substr(created, 1, 10)=$1 THEN 1 ELSE 0 END),0) AS today FROM orders", [today]),
+      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed, COALESCE(SUM(CASE WHEN status IN ('queued','printing') THEN 1 ELSE 0 END),0) AS active_jobs, COALESCE(SUM(CASE WHEN status='printing' THEN 1 ELSE 0 END),0) AS printing, COALESCE(SUM(CASE WHEN status IN ('awaiting_payment','awaiting_confirmation') THEN 1 ELSE 0 END),0) AS awaiting, COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0) AS failed, COALESCE(SUM(CASE WHEN status IN ('needs_review','payment_review') THEN 1 ELSE 0 END),0) AS review, COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END),0) AS cancelled, COALESCE(SUM(CASE WHEN status='expired' THEN 1 ELSE 0 END),0) AS expired, COALESCE(SUM(CASE WHEN substr(created, 1, 10)=$1 THEN 1 ELSE 0 END),0) AS today FROM orders", [today]),
       db.query("SELECT COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_collected FROM transactions"),
-      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN active=1 AND heartbeat IS NOT NULL THEN 1 ELSE 0 END),0) AS online FROM devices"),
+      db.query("SELECT COALESCE(SUM(amount),0) AS total_refunded, COUNT(*) AS count FROM refunds"),
+      db.query("SELECT * FROM devices"),
       db.query("SELECT substr(created, 1, 10) AS day, COUNT(*) AS count, COALESCE(SUM(amount),0) AS volume FROM orders GROUP BY substr(created, 1, 10) ORDER BY day DESC LIMIT 7")
     ]);
     res.json({
@@ -662,10 +681,19 @@ export async function createApp({ database, seed = true } = {}) {
         active: Number(orderCounts.active_jobs),
         awaiting: Number(orderCounts.awaiting),
         failed: Number(orderCounts.failed),
+        printing: Number(orderCounts.printing),
+        review: Number(orderCounts.review),
+        cancelled: Number(orderCounts.cancelled),
+        expired: Number(orderCounts.expired),
         today: Number(orderCounts.today)
       },
-      devices: { total: Number(deviceCounts.total), online: Number(deviceCounts.online) },
-      transactions: { count: Number(transCounts.count), volume: Number(transCounts.total_collected) },
+      // online = the connector checked in within 3 minutes (not "ever checked in"); ready = also not paused and not
+      // reporting a fault; attention = connector alive but Windows reports a blocking problem.
+      devices: (() => {
+        const states = deviceRows.filter(d => Number(d.active) === 1).map(d => evaluateDevice(d));
+        return { total: states.length, online: states.filter(s => s.connector_online).length, ready: states.filter(s => s.claimable).length, attention: states.filter(s => s.connector_online && s.blocking && s.state !== 'paused_by_owner').length, verified: states.filter(s => s.verified).length };
+      })(),
+      transactions: { count: Number(transCounts.count), volume: Number(transCounts.total_collected), refunded: Number(refundTotals.total_refunded), refunds: Number(refundTotals.count), net: Number(transCounts.total_collected) - Number(refundTotals.total_refunded) },
       daily: dailyOrders.reverse()
     });
   });
