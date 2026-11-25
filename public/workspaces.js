@@ -107,19 +107,51 @@ function networkForm(pc, escape) {
 function thisPcSection(pc, devices, reported, escape) {
   if (!pc) {
     return `<section class="panel scanner-panel" id="this-pc">
-      <div class="panel-heading"><div>
-        <div class="hero-badge">THIS COMPUTER</div>
-        <h2>SmartPrint connector is not running on this computer</h2>
-        <p class="muted">Open this page on the Windows PC your printers are plugged into (USB cable) or on the same Wi-Fi as the printers.</p>
-      </div></div>
-      <ol class="muted">
-        <li>Install each printer's Windows driver and print a Windows test page.</li>
-        <li>In the SmartPrint folder, run <strong>scripts\\install-connector-task.bat</strong> once. It starts the connector now, at every sign-in, and again within 2 minutes whenever it stops (for example after the laptop sleeps).</li>
-        <li>This page updates by itself when the connector is running. If the browser asks to access devices on your local network, choose <strong>Allow</strong>.</li>
-      </ol>
-      ${supportLinks()}
-      <div class="actions"><button class="primary small" id="check-connector">🔄 Check again</button></div>
-      ${reported.length ? `<p class="muted small" style="margin-top:16px">Printers reported by your shop PC: ${reported.map(p => escape(p.name)).join(', ')}. Open this page on that PC to connect one.</p>` : ''}
+      <div class="scanner-top">
+        <div>
+          <span class="hero-badge">THIS COMPUTER</span>
+          <h2>Connect your shop printers</h2>
+          <p class="muted">Open this page on the Windows PC connected to your printers (USB or same Wi-Fi). All HP, Brother, Epson, Canon and other Windows printers are detected automatically.</p>
+        </div>
+        <div class="scanner-top-actions">
+          <span class="badge pending">Waiting for connector</span>
+          <button class="primary small" id="check-connector">Check again</button>
+        </div>
+      </div>
+
+      <div class="connector-steps-grid">
+        <div class="connector-step">
+          <div class="step-num">1</div>
+          <div>
+            <strong>Plug in or join Wi-Fi</strong>
+            <p class="muted small">Connect your USB printer or join the same Wi-Fi, and ensure a Windows test page prints.</p>
+          </div>
+        </div>
+        <div class="connector-step">
+          <div class="step-num">2</div>
+          <div>
+            <strong>Start SmartPrint Connector</strong>
+            <p class="muted small">In your SmartPrint folder, run <code>start-connector.bat</code> (or <code>scripts\\install-connector-task.bat</code> for auto-start).</p>
+            <div class="connector-cmd-row">
+              <code>scripts\\install-connector-task.bat</code>
+              <button type="button" class="secondary small" id="copy-connector-cmd">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="connector-step">
+          <div class="step-num">3</div>
+          <div>
+            <strong>1-Click Connect</strong>
+            <p class="muted small">This page auto-checks every 5s. If the browser asks for local network access, choose <strong>Allow</strong>.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="driver-help-bar">
+        <span class="muted small">Need a printer driver?</span>
+        <div class="driver-links">${BRANDS.map(b => `<a class="driver-pill" href="${SUPPORT[b]}" target="_blank" rel="noopener noreferrer">${b}</a>`).join('')}</div>
+      </div>
+      ${reported.length ? `<p class="muted small" style="margin-top:12px">Printers reported by your shop PC: ${reported.map(p => escape(p.name)).join(', ')}. Open this page on that PC to manage them.</p>` : ''}
     </section>`;
   }
   const notice = pc.needsRelink
@@ -206,6 +238,14 @@ export async function printersPage({ api, workspace, escape, notify }) {
 
   const rerender = () => printersPage({ api, workspace, escape, notify });
   document.querySelector('#check-connector')?.addEventListener('click', event => { event.currentTarget.disabled = true; rerender(); });
+  document.querySelector('#copy-connector-cmd')?.addEventListener('click', async event => {
+    const btn = event.currentTarget;
+    try { await navigator.clipboard.writeText('scripts\\install-connector-task.bat'); btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 2000); }
+    catch { notify('Copy: scripts\\install-connector-task.bat'); }
+  });
+  if (!pc) {
+    setTimeout(() => { if (document.querySelector('#check-connector')) rerender(); }, 5000);
+  }
   document.querySelector('#rescan-printers')?.addEventListener('click', event => {
     event.currentTarget.disabled = true;
     event.currentTarget.textContent = 'Scanning…';
