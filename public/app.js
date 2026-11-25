@@ -42,7 +42,7 @@ async function api(path, { method = 'GET', body, token, binary, snapshot, header
 }
 
 function environmentLabel() {
-  return health?.mode === 'production' ? '' : `<div class="demo">${health?.demo ? 'Local demo · Sample accounts and data' : 'Development · Connected database'}</div>`;
+  return '';
 }
 
 function header() {
