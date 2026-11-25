@@ -133,6 +133,7 @@ function workspace(content, active, admin = false) {
   const links = admin ? [
     ['admin', 'Overview', 'home'],
     ['shops', 'Shops', 'shop'],
+    ['admin-printers', 'Printers', 'printer'],
     ['registrations', 'Registrations', 'list'],
     ['audit', 'Audit log', 'clock'],
     ['reports', 'Reports', 'chart'],
@@ -701,6 +702,7 @@ async function owner(view) {
   });
 }
 function empty(title, body) { return `<div class="empty"><strong>${title}</strong><span class="muted">${body}</span></div>`; }
+let printerFilter = { q: '', state: 'all' };
 async function admin(view) {
   if (!me) { location.hash = 'login'; await route(); return; }
   if (me.role === 'owner') { location.hash = 'owner'; await route(); return; }
@@ -708,12 +710,16 @@ async function admin(view) {
   if (me.role !== 'admin') { location.hash = 'login'; await route(); return; }
   if (me.mfaRequired) { location.hash = 'security'; await route(); return; }
   const { adminDashboard } = await import('./dashboards.js?v=1.0.4');
-  const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null)]);
-  const snapshot = await load(), [shops, events, stats] = snapshot;
+  const withPrinters = view === 'admin-printers';
+  const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null), ...(withPrinters ? [api('/api/admin/devices')] : [])]);
+  const snapshot = await load(), [shops, events, stats, printers] = snapshot;
   let content, afterRender;
   if (view === 'registrations') {
     const platformView = await import('./platform.js');
     ({ html: content, bind: afterRender } = await platformView.registrationsView({ api, escape, time, notify, refresh: route }));
+  } else if (view === 'admin-printers') {
+    const printersView = await import('./admin-printers.js');
+    content = printersView.adminPrintersView({ devices: printers, escape, filter: printerFilter, time });
   } else if (view === 'audit') {
     content = `<div class="workhead"><div><h1>Audit log</h1><p class="muted">A record of shop access, payments and print fulfilment.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><div class="panel-heading"><h2>Recent events</h2><span class="muted">Latest 100</span></div>${events.length ? `<div class="table-wrap"><table><thead><tr><th>Action</th><th>Actor</th><th>Target</th><th>Time</th></tr></thead><tbody>${events.map(e => `<tr><td>${escape(e.action)}</td><td>${escape(e.actor.slice(0, 12))}</td><td>${escape(e.target.slice(0, 12))}</td><td>${time(e.created)}</td></tr>`).join('')}</tbody></table></div>` : empty('No events yet.', 'Administrative and fulfilment actions appear here.')}</section>`;
   } else if (view === 'reports') {
@@ -728,6 +734,15 @@ async function admin(view) {
   
   const refreshBtn = document.querySelector('#admin-refresh');
   if (refreshBtn) refreshBtn.onclick = () => route();
+
+  const printerSearch = document.querySelector('#printer-search'), printerState = document.querySelector('#printer-state');
+  if (printerSearch && printerState) {
+    // Filters are re-applied by redrawing in place so typing is not lost when the page refreshes itself.
+    // Controls are read as they are NOW: the whole panel is replaced on every redraw.
+    const redraw = async () => { printerFilter = { q: document.querySelector('#printer-search').value, state: document.querySelector('#printer-state').value }; const body = document.querySelector('.printer-filters')?.closest('.panel'); if (!body) return; const view2 = await import('./admin-printers.js'); const fresh = document.createElement('div'); fresh.innerHTML = view2.adminPrintersView({ devices: printers, escape, filter: printerFilter, time }); const panel = fresh.querySelector('.panel'); body.replaceWith(panel); document.querySelector('#printer-search').focus(); const el = document.querySelector('#printer-search'); el.setSelectionRange?.(el.value.length, el.value.length); bindPrinterFilters(); };
+    function bindPrinterFilters() { document.querySelector('#printer-search').oninput = redraw; document.querySelector('#printer-state').onchange = redraw; }
+    bindPrinterFilters();
+  }
 
   const searchInput = document.querySelector('#shop-search-input');
   const globalSearch = document.querySelector('#global-admin-search');
@@ -826,7 +841,7 @@ async function admin(view) {
     document.querySelectorAll('.action-dropdown-menu').forEach(m => m.hidden = true);
   }, { passive: true });
 
-  watchUpdates(load, snapshot, () => admin(view));
+  watchUpdates(load, snapshot, () => document.activeElement?.id === 'printer-search' ? undefined : admin(view));
 }
 
 function auth(register = false) {
@@ -1083,7 +1098,7 @@ async function route() {
     }
     else if (view === 'track') await tracking();
     else if (['owner', 'queue', 'settings', 'transactions', 'payments', 'printers'].includes(view)) await owner(view);
-    else if (['admin', 'shops', 'registrations', 'audit', 'reports', 'settings-admin'].includes(view)) await admin(view);
+    else if (['admin', 'shops', 'admin-printers', 'registrations', 'audit', 'reports', 'settings-admin'].includes(view)) await admin(view);
     else auth(false);
   } catch (error) {
     mount(`<main class="container"><section class="panel"><h1>We couldn’t open this page.</h1><p class="error">${escape(error.message)}</p><a href="#login">Sign in</a> · <a href="#print">Try your shop again</a></section></main>`);

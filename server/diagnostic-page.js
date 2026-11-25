@@ -1,6 +1,8 @@
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 
-export async function generateTestPage(shopName = 'SmartPrint Shop', deviceName = 'Shop Printer') {
+// abilities: what SmartPrint believes about this printer, e.g. { summary: 'Colour + black & white · Two-sided + one-sided', mode: 'Colour' },
+// printed on the page so a wrong setting (a colour printer set to black & white) is obvious on paper.
+export async function generateTestPage(shopName = 'SmartPrint Shop', deviceName = 'Shop Printer', abilities = null) {
   const doc = await PDFDocument.create();
   const page = doc.addPage([595.28, 841.89]); // A4
   const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -37,9 +39,9 @@ export async function generateTestPage(shopName = 'SmartPrint Shop', deviceName 
   const infoY = height - 150;
   page.drawRectangle({
     x: 36,
-    y: infoY - 80,
+    y: infoY - 104,
     width: width - 72,
-    height: 90,
+    height: 114,
     color: rgb(0.96, 0.97, 0.99),
     borderColor: rgb(0.85, 0.88, 0.93),
     borderWidth: 1,
@@ -48,6 +50,10 @@ export async function generateTestPage(shopName = 'SmartPrint Shop', deviceName 
   page.drawText(`Shop: ${shopName}`, { x: 50, y: infoY - 20, size: 13, font: fontBold, color: rgb(0.1, 0.1, 0.1) });
   page.drawText(`Printer Device: ${deviceName}`, { x: 50, y: infoY - 42, size: 12, font, color: rgb(0.2, 0.2, 0.2) });
   page.drawText(`Date & Time: ${new Date().toLocaleString('en-IN')}`, { x: 50, y: infoY - 62, size: 10, font, color: rgb(0.4, 0.4, 0.4) });
+  if (abilities) {
+    page.drawText(`Set up in SmartPrint as: ${abilities.summary}`, { x: 50, y: infoY - 80, size: 10, font: fontBold, color: rgb(0.1, 0.1, 0.1) });
+    page.drawText(`This test was sent in: ${abilities.mode}. If the swatches below print grey, this printer or its driver is printing in black & white.`, { x: 50, y: infoY - 95, size: 8, font, color: rgb(0.4, 0.4, 0.4) });
+  }
 
   // Calibration and Margins Box
   page.drawRectangle({

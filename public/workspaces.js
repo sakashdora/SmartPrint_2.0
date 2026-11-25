@@ -25,8 +25,8 @@ let freshScan = false;
 
 // What a printer can do. The owner always has the last word; detection only pre-fills the choice.
 const abilityPicker = ({ color, duplex, scope, id = '', disabled = false }) => `<div class="ability-picker" style="display:flex;gap:12px;flex-wrap:wrap;margin:8px 0">
-  <label class="small">Prints <select data-ability="color" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${color ? '' : 'selected'}>Black &amp; white only</option><option value="true" ${color ? 'selected' : ''}>Colour</option></select></label>
-  <label class="small">Sides <select data-ability="duplex" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${duplex ? '' : 'selected'}>One-sided only</option><option value="true" ${duplex ? 'selected' : ''}>Two-sided (automatic)</option></select></label></div>`;
+  <label class="small">Prints <select data-ability="color" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${color ? '' : 'selected'}>Black &amp; white only</option><option value="true" ${color ? 'selected' : ''}>Colour + black &amp; white</option></select></label>
+  <label class="small">Sides <select data-ability="duplex" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${duplex ? '' : 'selected'}>One-sided only</option><option value="true" ${duplex ? 'selected' : ''}>Two-sided (automatic) + one-sided</option></select></label></div>`;
 
 const BRANDS = ['HP', 'Brother', 'Epson', 'Canon'];
 // Official maker support pages, where the owner downloads the Windows driver. SmartPrint never installs a driver itself.
@@ -34,6 +34,9 @@ const SUPPORT = { HP: 'https://support.hp.com/in-en/drivers/printers', Brother: 
 let addTab = 'usb'; // which "add a printer" tab is open; kept across the page's automatic refreshes
 const sameName = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 const supportLinks = () => `<p class="muted small">Need the driver? Download it from the maker, install it, then click <strong>Scan again</strong>: ${BRANDS.map(b => `<a href="${SUPPORT[b]}" target="_blank" rel="noopener noreferrer">${b}</a>`).join(' · ')}.</p>`;
+const abilityChips = ab => ab ? `<span class="chip">${ab.colour ? '🎨 Colour + B&amp;W' : '⚫ B&amp;W only'}</span><span class="chip">${ab.two_sided ? '⇄ Two-sided + one-sided' : '▭ One-sided only'}</span>` : '';
+const abilitySource = ab => ab.source === 'driver' ? `Detected from the printer driver${ab.detected?.checked_at ? ` · checked ${new Date(ab.detected.checked_at).toLocaleTimeString()}` : ''}. Updated automatically.`
+  : ab.source === 'owner' ? 'Set by you. Scans will not change it.' : 'Not verified yet: colour and two-sided stay off until the driver is read or you set them.';
 const connectionChip = p => p.isWifi ? '📶 Wi-Fi / network' : p.isWired ? '🔌 USB cable' : '🖨️ Local port';
 
 function printerCard(p, pc, devices, escape) {
@@ -42,7 +45,15 @@ function printerCard(p, pc, devices, escape) {
   const here = Boolean(pc.linkedHere && link);
   const ready = here && !link.authFailed && isOnline(device);
   const maker = p.manufacturer && p.manufacturer !== 'Other' ? p.manufacturer : '';
-  const offline = p.status === 'Offline';
+  const blocking = Boolean(p.windowsBlocking ?? p.status === 'Offline');
+  // What is actually wrong, in words the owner can act on.
+  const advice = {
+    usb_missing: 'Windows has this printer installed, but no USB device is attached to it. Plug in the USB cable, switch the printer on, then click Scan again.',
+    offline: p.isWifi ? 'Windows cannot reach this printer. Switch it on, make sure it is on the same Wi-Fi as this PC, or add it again by its address below.' : 'Windows has this printer set to offline. Check the USB cable and power. If it is plugged in, open Windows Settings > Printers, open this printer and untick "Use Printer Offline".',
+    paper_jam: 'Clear the paper jam, then click Scan again.', paper_out: 'Add paper, then click Scan again.', door_open: 'Close the printer cover, then click Scan again.',
+    toner_out: 'The printer reports it is out of toner or ink.', paused: 'The Windows print queue is paused. Resume it in Windows Settings > Printers.'
+  }[p.windowsState] || (blocking ? `Windows reports: ${p.windowsStateLabel || 'a printer problem'}.` : '');
+  const detected = p.isWired && p.usbPresent === true;
   return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}" data-printer="${escape(p.name)}">
     <div class="scanned-card-header">
       <div class="scanned-icon ${p.isWifi ? 'icon-wifi' : p.isWired ? 'icon-wired' : 'icon-printer'}">${p.isWifi ? '📶' : p.isWired ? '🔌' : '🖨️'}</div>
@@ -53,11 +64,12 @@ function printerCard(p, pc, devices, escape) {
     </div>
     <div class="scanned-meta">
       <span class="chip">${escape(p.driverName || 'Windows driver')}</span>
-      <span class="chip ${offline ? 'chip-warn' : ''}">${offline ? '⚠ Offline in Windows' : escape(p.windowsStateLabel || p.status || 'Ready')}</span>
+      <span class="chip ${blocking ? 'chip-warn' : ''}">${blocking ? '⚠ ' : ''}${escape(p.windowsStateLabel || p.status || 'Ready')}</span>
+      ${detected ? '<span class="chip chip-ok">✔ USB cable detected</span>' : ''}
     </div>
-    ${offline ? `<p class="muted small">${p.isWifi ? 'Windows cannot reach this printer. Switch it on, make sure it is on the same Wi-Fi as this PC, or add it again by its address below.' : 'Windows reports this printer offline. Check the USB cable and power.'}</p>` : ''}
+    ${advice ? `<p class="${blocking ? 'printer-advice' : 'muted small'}">${escape(advice)}</p>` : ''}
     ${abilityPicker({ color: p.color, duplex: p.duplex, scope: 'scan', disabled: ready })}
-    ${p.verified ? '<p class="muted small">Pre-filled from the printer driver. Change it if your printer is different.</p>' : '<p class="muted small">The driver did not say what this printer can do. Choose below before connecting.</p>'}
+    ${p.verified ? `<p class="muted small"><strong>Driver check:</strong> ${p.color ? 'colour + black &amp; white' : 'black &amp; white only'}, ${p.duplex ? 'two-sided + one-sided' : 'one-sided only'}. Pre-filled below; change it only if your printer is different.</p>` : '<p class="muted small"><strong>Not verified:</strong> the driver did not say what this printer can do. Choose below before connecting.</p>'}
     <div class="scanned-actions">
       ${ready ? `<span class="badge active"><span class="live-dot dot-online"></span> Connected &amp; online</span>
         <button class="secondary small" data-test-print="${device.id}">Test print</button>
@@ -168,6 +180,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
       const online = isOnline(d);
       const known = [...(pc?.printers || []), ...reported].find(p => sameName(p.name, d.name));
       const kind = (d.manufacturer && d.manufacturer !== 'Other' ? `<span class="chip brand-chip">${escape(d.manufacturer)}</span>` : '') + (known ? `<span class="chip">${connectionChip(known)}</span>` : '');
+      const ab = d.abilities;
+      const driverSays = ab?.detected ? `${ab.detected.colour ? 'colour + black &amp; white' : 'black &amp; white only'}, ${ab.detected.two_sided ? 'two-sided + one-sided' : 'one-sided only'}` : '';
       return `<div class="printer-card ${online ? 'is-online' : 'is-offline'} ${d.is_paused ? 'is-paused' : ''}">
         <div class="printer-card-top">
           <div class="printer-title">
@@ -178,9 +192,11 @@ export async function printersPage({ api, workspace, escape, notify }) {
         </div>
         <p class="muted small">${online ? escape(d.status_note || 'Connector online · printer status not reported') + (d.health?.checked_at ? ` · Windows status checked ${new Date(d.health.checked_at).toLocaleTimeString()}` : '') : d.active ? (d.heartbeat ? `Offline since ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on its PC, or click Connect above.` : 'Waiting for the connector to check in.') : 'Disconnected'}</p>
         ${d.active ? abilityPicker({ color: Number(d.color) === 1, duplex: Number(d.duplex) === 1, scope: 'device', id: d.id }) : `<div class="capability-tags"><span class="chip">${d.color ? 'Colour' : 'Black & white'}</span><span class="chip">${d.duplex ? 'Two-sided' : 'One-sided'}</span></div>`}
-        ${d.active ? `<p class="muted small">${d.cap_source === 'manual' ? 'Set by you; scans never change it.' : 'Detected from the driver; change it if it is wrong.'}${d.cap_source === 'manual' ? ` <a href="#" data-use-detected="${d.id}">Use detected</a>` : ''}</p>` : ''}
+        ${d.active && ab ? `<div class="ability-chips">${abilityChips(ab)}</div><p class="muted small">${escape(abilitySource(ab))}</p>` : ''}
+        ${d.active && ab?.has_mismatch ? `<p class="printer-advice">⚠ The driver reports <strong>${driverSays}</strong>, but this printer is set to <strong>${escape(ab.summary)}</strong>. Customers are only offered what is set here. <a href="#" data-use-detected="${d.id}">Use what the driver detected</a></p>` : ''}
+        ${d.active && ab?.source === 'owner' && !ab.has_mismatch && ab.detected ? `<p class="muted small">Matches the driver. <a href="#" data-use-detected="${d.id}">Switch to automatic detection</a></p>` : ''}
         ${d.active ? `<div class="printer-actions">
-          <button class="secondary small" data-test-print="${d.id}" ${online ? '' : 'disabled title="The printer must be online"'}>Test print</button>
+          <button class="secondary small" data-test-print="${d.id}" ${online ? '' : 'disabled title="The printer must be online"'}>Test print (${Number(d.color) === 1 ? 'colour' : 'B&amp;W'})</button>
           <button class="secondary small" data-pause="${d.id}">${d.is_paused ? '▶ Resume' : '⏸ Pause'}</button>
           <button class="danger small" data-revoke="${d.id}">Disconnect</button>
         </div>` : ''}
@@ -264,7 +280,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
     try {
       const linked = await api('/api/owner/printers/autoconnect', {
         method: 'POST',
-        body: { name: printer.name, color: picked('color'), duplex: picked('duplex'), manual: true }
+        // Accepting exactly what the driver reported keeps the printer on live auto-detection; any change is the owner's own choice.
+        body: { name: printer.name, color: picked('color'), duplex: picked('duplex'), manual: !(printer.verified && picked('color') === Boolean(printer.color) && picked('duplex') === Boolean(printer.duplex)) }
       });
       await connectorCall('/pair', { method: 'POST', body: { url: location.origin, token: linked.token, printer: printer.name, replace } });
       let device;

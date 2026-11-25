@@ -119,7 +119,10 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
             ['devices', 'health', 'TEXT'],
             ['devices', 'health_detail', 'TEXT'],
             ['devices', 'health_checked', 'TEXT'],
-            ['devices', 'health_source', 'TEXT']
+            ['devices', 'health_source', 'TEXT'],
+            ['devices', 'det_color', 'INTEGER'],
+            ['devices', 'det_duplex', 'INTEGER'],
+            ['devices', 'det_at', 'TEXT']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -190,7 +193,8 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN created TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN cap_source TEXT;"); } catch {}
-      for (const column of ['health', 'health_detail', 'health_checked', 'health_source']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} TEXT;`); } catch {} }
+      for (const column of ['health', 'health_detail', 'health_checked', 'health_source', 'det_at']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} TEXT;`); } catch {} }
+      for (const column of ['det_color', 'det_duplex']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} INTEGER;`); } catch {} }
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

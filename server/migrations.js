@@ -167,6 +167,12 @@ export const migrations = [
     description: 'Printers store the last health state Windows reported (state, detail, time, source) apart from the connector heartbeat',
     async up(tx) { await tx.query('SELECT health, health_detail, health_checked, health_source FROM devices LIMIT 1'); }
   }
+  ,
+  {
+    id: '0020_printer_detected_abilities',
+    description: 'Printers remember what the driver reported (colour, two-sided, when) apart from what the owner set',
+    async up(tx) { await tx.query('SELECT det_color, det_duplex, det_at FROM devices LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();

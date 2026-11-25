@@ -148,8 +148,8 @@ async function collectLocalPrinters({ maxAge = 15000 } = {}) {
     const port = String(p.PortName || '').trim(), name = String(p.Name).trim(), driver = String(p.DriverName || name).trim();
     const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver });
     if (connType === 'Virtual / PDF') continue;
-    const health = classifyPrinterHealth(p.PrinterStatus ?? null);
-    printers.push({ name, portName: port, driverName: driver, manufacturer: detectManufacturer(name, driver), connectionType: connType, isWifi, isWired, isDefault: Boolean(p.Default), status: checkPrinterStatus(p.PrinterStatus).status, windowsState: health.state, windowsStateLabel: health.label, ...guessCapabilities(name, driver), verified: false });
+    const health = classifyPrinterHealth(p.PrinterStatus ?? null, { usbPresent: typeof p.UsbPresent === 'boolean' ? p.UsbPresent : null, workOffline: p.WorkOffline === true });
+    printers.push({ name, portName: port, driverName: driver, manufacturer: detectManufacturer(name, driver), connectionType: connType, isWifi, isWired, isDefault: Boolean(p.Default), status: health.blocking ? 'Offline' : checkPrinterStatus(p.PrinterStatus).status, windowsState: health.state, windowsStateLabel: health.label, windowsBlocking: health.blocking, usbPresent: typeof p.UsbPresent === 'boolean' ? p.UsbPresent : null, ...guessCapabilities(name, driver), verified: false });
   }
   const capabilities = await probePrinterCapabilities(printers.map(p => p.name));
   for (const p of printers) if (capabilities.has(p.name)) Object.assign(p, capabilities.get(p.name), { verified: true });
@@ -209,11 +209,12 @@ async function scanAndReportLocalPrinters() {
       if (worker.authFailed) continue;
       const own = rawWindows.find(p => p?.Name && keyOf(p.Name) === keyOf(worker.name));
       const code = own ? (own.PrinterStatus ?? null) : null; // null = Windows could not tell us
-      const verdict = classifyPrinterHealth(code);
+      const usbPresent = typeof own?.UsbPresent === 'boolean' ? own.UsbPresent : null, workOffline = own?.WorkOffline === true;
+      const verdict = classifyPrinterHealth(code, { usbPresent, workOffline });
       worker.health = { blocking: verdict.blocking, label: verdict.label, state: verdict.state, at: Date.now() };
       const caps = capabilities.get(worker.name);
       // Always report: "Windows could not tell us" is itself the honest answer.
-      await worker.request('/api/device/printers/scanned', { method: 'POST', body: { printers: first ? printers : [], health: { code }, ...(caps ? { capabilities: caps } : {}) } }).catch(() => {});
+      await worker.request('/api/device/printers/scanned', { method: 'POST', body: { printers: first ? printers : [], health: { code, usbPresent, workOffline }, ...(caps ? { capabilities: caps } : {}) } }).catch(() => {});
       first = false;
     }
   } catch {}

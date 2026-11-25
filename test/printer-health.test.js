@@ -286,3 +286,45 @@ test('/api/health does not invent a commit id', async t => {
   assert.equal((await request('/api/health')).body.commit, null);
   void saved;
 });
+
+// ---- wired printers: "installed in Windows" is not "plugged in" ------------------------------------------------------
+test('an unplugged USB printer is not ready even though Windows calls it normal', () => {
+  // Windows reports PrinterStatus 0 for the unplugged HP LaserJet 1020 on the dev PC; USB presence and "Use Printer Offline" tell the truth.
+  const unplugged = classifyPrinterHealth(0, { usbPresent: false, workOffline: true });
+  assert.deepEqual([unplugged.state, unplugged.blocking], ['usb_missing', true]);
+  assert.match(unplugged.label, /USB cable not detected/);
+  assert.equal(classifyPrinterHealth(0, { usbPresent: false }).state, 'usb_missing');
+  assert.deepEqual([classifyPrinterHealth(0, { usbPresent: true }).state, classifyPrinterHealth(0, { usbPresent: true }).blocking], ['ready', false], 'attached and fine: ready');
+  assert.equal(classifyPrinterHealth(0, { usbPresent: null }).state, 'ready', 'not a USB port or unknown: not blamed');
+  const offline = classifyPrinterHealth(0, { workOffline: true });
+  assert.deepEqual([offline.state, offline.blocking], ['offline', true]);
+  assert.match(offline.flags.join(' '), /Use Printer Offline/);
+  assert.equal(classifyPrinterHealth(0x8, { workOffline: true }).state, 'paper_jam', 'a more specific fault is not hidden by the offline switch');
+  assert.equal(classifyPrinterHealth(0x80, { usbPresent: true }).state, 'offline');
+  assert.equal(classifyPrinterHealth(null, { usbPresent: true }).state, 'unknown', 'an attached cable alone does not prove the printer is healthy');
+});
+
+test('an unplugged wired printer takes no jobs and no online payment, and the server ignores made-up flags', async t => {
+  const { request, owner, connect, makeQuote } = await start(t);
+  const device = await connect();
+  const send = health => request('/api/device/printers/scanned', { method: 'POST', token: device.token, body: { printers: [], health } });
+  const state = async () => (await request('/api/owner/devices', { cookie: owner })).body[0].health;
+
+  await send({ code: 0, usbPresent: true, workOffline: false });
+  assert.deepEqual([(await state()).state, (await state()).claimable], ['ready', true]);
+
+  await send({ code: 0, usbPresent: false, workOffline: true }); // cable pulled
+  assert.deepEqual([(await state()).state, (await state()).claimable], ['usb_missing', false]);
+  assert.equal((await request('/api/device/claim', { method: 'POST', token: device.token })).body, null);
+  assert.equal((await request('/api/shops/campus-print')).body.printersReady, 0);
+  const quote = await makeQuote();
+  const refused = await request('/api/orders', { method: 'POST', token: quote.secret, body: { quoteId: quote.quoteId, method: 'online' } });
+  assert.equal(refused.status, 409);
+  assert.match(refused.body.error, /USB cable not detected/);
+
+  // values that are not real booleans are not believed
+  await send({ code: 0, usbPresent: 'false', workOffline: 'true' });
+  assert.equal((await state()).state, 'ready');
+  await send({ code: 0, usbPresent: true }); // plugged back in
+  assert.equal((await state()).claimable, true);
+});

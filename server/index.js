@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import QRCode from 'qrcode';
 import { openDatabase } from './db.js';
 import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt, mfaPolicy, clientIp } from './security.js';
-import { evaluateDevice, shopPrinterAvailability } from './printer-health.js';
+import { evaluateDevice, shopPrinterAvailability, describeAbilities } from './printer-health.js';
+import { detectManufacturer } from './printer-capabilities.js';
 import { price, validateOptions } from './print-options.js';
 import { configuration } from './config.js';
 import { authRoutes } from './auth.js';
@@ -237,8 +238,10 @@ export async function createApp({ database, seed = true } = {}) {
     const devices = await db.query('SELECT * FROM devices WHERE shop_id=$1 AND active=1', [shop.id]);
     // printersReady counts printers that are connected, not paused and not reporting a fault right now; customers only
     // see this count (never printer names, faults or paper/toner detail).
-    const printersReady = devices.filter(d => evaluateDevice(d).claimable).length;
-    res.json({ ...shop, colorAvailable: devices.some(d => Number(d.color) === 1), duplexAvailable: devices.some(d => Number(d.duplex) === 1), printerCount: devices.length, printersReady });
+    const ready = devices.filter(d => evaluateDevice(d).claimable);
+    const printersReady = ready.length;
+    // colorAvailable / duplexAvailable: some connected printer CAN do it. colorReady / duplexReady: one that can is ready NOW.
+    res.json({ ...shop, colorAvailable: devices.some(d => Number(d.color) === 1), duplexAvailable: devices.some(d => Number(d.duplex) === 1), colorReady: ready.some(d => Number(d.color) === 1), duplexReady: ready.some(d => Number(d.duplex) === 1), printerCount: devices.length, printersReady });
   });
   class ConcurrencyQueue {
     constructor(maxConcurrent = 8, timeoutMs = 30000) {
@@ -655,8 +658,8 @@ export async function createApp({ database, seed = true } = {}) {
     res.json(rows.map(publicOrder));
   });
   app.get('/api/admin/devices', async (req, res) => {
-    const rows = await db.query('SELECT d.id, d.shop_id, d.name, d.active, d.heartbeat, d.color, d.duplex, d.paused, d.paused_note, d.health, d.health_detail, d.health_checked, d.health_source, s.name as shop_name FROM devices d JOIN shops s ON s.id=d.shop_id ORDER BY d.active DESC, d.heartbeat DESC');
-    res.json(rows.map(({ paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, ...row }) => ({ ...row, is_paused: Number(paused) ? 1 : 0, health: evaluateDevice({ ...row, paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s }) })));
+    const rows = await db.query('SELECT d.id, d.shop_id, d.name, d.active, d.heartbeat, d.color, d.duplex, d.cap_source, d.det_color, d.det_duplex, d.det_at, d.paused, d.paused_note, d.health, d.health_detail, d.health_checked, d.health_source, s.name as shop_name, s.slug as shop_slug FROM devices d JOIN shops s ON s.id=d.shop_id ORDER BY d.active DESC, d.heartbeat DESC');
+    res.json(rows.map(({ paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, det_color, det_duplex, det_at, ...row }) => ({ ...row, manufacturer: detectManufacturer(row.name), abilities: describeAbilities({ ...row, det_color, det_duplex, det_at }), is_paused: Number(paused) ? 1 : 0, health: evaluateDevice({ ...row, paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s }) })));
   });
   app.get('/api/admin/payments', async (req, res) => {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));

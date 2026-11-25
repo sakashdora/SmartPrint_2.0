@@ -785,17 +785,41 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
   const form = document.querySelector('#print-form');
   // Only offer what this shop's printers can actually do (set by the shop owner, or detected from the printer).
-  const limitOption = (selector, groupSelector, message) => {
+  //   disable: the option cannot be chosen (no connected printer can do it); a plain note only warns (a capable printer exists but is not ready).
+  const setNote = (selector, groupSelector, key, message, { disable = false } = {}) => {
     const input = form.querySelector(selector);
     if (!input) return;
-    input.disabled = true;
-    input.closest('label')?.classList.add('is-disabled');
-    input.closest('label')?.setAttribute('title', message);
-    const group = form.querySelector(groupSelector);
-    if (group && !group.querySelector('.ability-note')) group.insertAdjacentHTML('beforeend', `<p class="muted small ability-note" style="margin:6px 0 0">${message}</p>`);
+    const label = input.closest('label'), group = form.querySelector(groupSelector);
+    const note = group?.querySelector(`.ability-note[data-note="${key}"]`);
+    if (disable) {
+      input.disabled = true; label?.classList.add('is-disabled'); label?.setAttribute('title', message.replace(/&amp;/g, '&'));
+    } else if (key === 'can') { input.disabled = false; label?.classList.remove('is-disabled'); label?.removeAttribute('title'); }
+    if (message && group && !note) group.insertAdjacentHTML('beforeend', `<p class="muted small ability-note" data-note="${key}" style="margin:6px 0 0">${message}</p>`);
+    else if (message && note) note.innerHTML = message;
+    else if (!message && note) note.remove();
   };
-  if (shop.printerCount > 0 && shop.colorAvailable === false) limitOption('[name=color][value=color]', '.option-color-group', 'This shop prints in black &amp; white only.');
-  if (shop.printerCount > 0 && shop.duplexAvailable === false) limitOption('[name=duplex][value=true]', '.option-sides-group', 'This shop prints one-sided only.');
+  // What this shop's printers can do, and which of them are ready right now. Called on load and every 20 seconds, so a
+  // printer that is switched off, jammed or unplugged is reflected without the customer reloading the page.
+  let capabilitiesApplied = false;
+  function applyShopCapabilities() {
+    if (!shop.printerCount && !capabilitiesApplied) return;
+    capabilitiesApplied = true;
+    const has = shop.printerCount > 0;
+    setNote('[name=color][value=color]', '.option-color-group', 'can', has && shop.colorAvailable === false ? 'This shop prints in black &amp; white only.' : '', { disable: has && shop.colorAvailable === false });
+    setNote('[name=duplex][value=true]', '.option-sides-group', 'can', has && shop.duplexAvailable === false ? 'This shop prints one-sided only.' : '', { disable: has && shop.duplexAvailable === false });
+    setNote('[name=color][value=color]', '.option-color-group', 'ready', has && shop.colorAvailable !== false && shop.colorReady === false ? 'The shop\'s colour printer is not ready right now. Colour orders wait until it is back; pay at the counter if you order now.' : '');
+    setNote('[name=duplex][value=true]', '.option-sides-group', 'ready', has && shop.duplexAvailable !== false && shop.duplexReady === false ? 'The shop\'s two-sided printer is not ready right now.' : '');
+    let banner = document.querySelector('#shop-ready-note');
+    const message = has && shop.printersReady === 0 ? 'The shop\'s printer is not ready right now (switched off, unplugged or has a problem). You can still prepare your order; online payment is paused until it is ready, and cash or UPI at the counter still works.' : '';
+    if (message && !banner) { form.insertAdjacentHTML('afterbegin', '<p class="notice-inline" id="shop-ready-note" role="status"></p>'); banner = document.querySelector('#shop-ready-note'); }
+    if (banner) { banner.textContent = message; banner.hidden = !message; }
+  }
+  applyShopCapabilities();
+  const capabilityTimer = setInterval(async () => {
+    if (!form.isConnected) { clearInterval(capabilityTimer); return; }
+    try { Object.assign(shop, await api(`/api/shops/${encodeURIComponent(slug)}`)); applyShopCapabilities(); } catch {}
+  }, 20000);
+  capabilityTimer.unref?.();
   const dropPanel = document.querySelector('#drop-panel');
   const fileInput = document.querySelector('#files');
   // A photo taken with the phone camera goes through exactly the same path as a chosen file.

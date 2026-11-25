@@ -9,7 +9,7 @@ import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
 import { classifyConnection, guessCapabilities, detectManufacturer } from './printer-capabilities.js';
 import { createNotification } from './notifications.js';
-import { printerSupports, evaluateDevice, classifyPrinterHealth } from './printer-health.js';
+import { printerSupports, evaluateDevice, classifyPrinterHealth, describeAbilities } from './printer-health.js';
 
 const runExec = promisify(execFile);
 const now = () => new Date().toISOString();
@@ -323,13 +323,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,health,health_detail,health_checked,health_source FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,health,health_detail,health_checked,health_source,det_color,det_duplex,det_at FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
     res.json(rows.map(row => {
-      const { paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, ...d } = row;
+      const { paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, det_color: _dc, det_duplex: _dd, det_at: _da, ...d } = row;
       const health = evaluateDevice(row);
       return {
         ...d,
         manufacturer: detectManufacturer(d.name),
+        abilities: describeAbilities(row),
         is_paused: Number(paused) ? 1 : 0,
         health,
         // Never "Ready" just because the connector is alive: the note says what is actually known.
@@ -353,12 +354,15 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   // sets is never overwritten by what the connector detects; `useDetected: true` hands control back to detection.
   app.patch('/api/owner/devices/:id', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const [device] = await db.query('SELECT id, color, duplex, cap_source FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    const [device] = await db.query('SELECT id, color, duplex, cap_source, det_color, det_duplex, det_at FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Printer not found.');
     if (req.body.useDetected === true) {
-      await db.query("UPDATE devices SET cap_source='driver' WHERE id=$1", [device.id]);
+      // Back to automatic: take what the driver last reported right away (when it has reported); otherwise the next scan fills it in.
+      const known = Boolean(device.det_at);
+      const color = known ? Number(device.det_color) : device.color, duplex = known ? Number(device.det_duplex) : device.duplex;
+      await db.query("UPDATE devices SET cap_source='driver', color=$1, duplex=$2 WHERE id=$3", [color, duplex, device.id]);
       await audit(db, req.user.id, 'device.capabilities_auto', device.id);
-      return res.json({ ok: true, cap_source: 'driver', color: Boolean(device.color), duplex: Boolean(device.duplex) });
+      return res.json({ ok: true, cap_source: 'driver', color: Boolean(color), duplex: Boolean(duplex), applied: known });
     }
     if (typeof req.body.color !== 'boolean' && typeof req.body.duplex !== 'boolean') throw fail(400, 'Choose colour and/or two-sided.');
     const color = typeof req.body.color === 'boolean' ? (req.body.color ? 1 : 0) : device.color;
@@ -384,7 +388,8 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (!device) throw fail(404, 'Active device not found.');
     // A test page for an offline printer would sit in the queue and print by surprise later.
     if (!device.heartbeat || Date.now() - new Date(device.heartbeat).getTime() > 180000) throw fail(409, `${device.name} is offline: its SmartPrint connector is not running or not linked. Connect it from this page on the shop PC, then try again.`);
-    const testBytes = await generateTestPage(shop.name, device.name);
+    const abilities = describeAbilities(device);
+    const testBytes = await generateTestPage(shop.name, device.name, { summary: abilities.source === 'unverified' ? 'not verified yet (treated as black & white, one-sided)' : abilities.summary, mode: device.color ? 'colour' : 'black & white' });
     const docId = randomUUID(), orderId = randomUUID(), receipt = token();
     const sealed = encrypt(testBytes, key);
     const options = { color: device.color ? 'color' : 'bw', duplex: false, copies: 1, layout: 'single', range: '', file_name: 'SmartPrint_Diagnostic_Test.pdf', priority: 100 };
@@ -570,11 +575,15 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const capabilities = req.body.capabilities;
     if (capabilities && typeof capabilities.color === 'boolean' && typeof capabilities.duplex === 'boolean') {
       await db.query("UPDATE devices SET color=$1, duplex=$2 WHERE id=$3 AND COALESCE(cap_source,'driver')<>'manual'", [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
+      // What the driver reported is always remembered, even when the owner's own choice is in force, so a setting that
+      // disagrees with the printer (colour printer set to black & white) can be shown to the owner and the admin.
+      await db.query('UPDATE devices SET det_color=$1, det_duplex=$2, det_at=$3 WHERE id=$4', [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, now(), req.device.id]);
     }
     // What Windows says the printer itself is doing. The server classifies the raw spooler status itself, so a
     // connector (or anything holding its key) cannot invent a state name; "code: null" means Windows could not say.
     if (req.body.health && typeof req.body.health === 'object') {
-      const verdict = classifyPrinterHealth(req.body.health.code ?? null);
+      const reported = req.body.health;
+      const verdict = classifyPrinterHealth(reported.code ?? null, { usbPresent: typeof reported.usbPresent === 'boolean' ? reported.usbPresent : null, workOffline: reported.workOffline === true });
       const [before] = await db.query('SELECT health FROM devices WHERE id=$1', [req.device.id]);
       await db.query('UPDATE devices SET health=$1, health_detail=$2, health_checked=$3, health_source=$4 WHERE id=$5', [verdict.state, verdict.flags.join(', ').slice(0, 200) || null, now(), 'windows-spooler', req.device.id]);
       // One notification per change into a problem, not one per scan.

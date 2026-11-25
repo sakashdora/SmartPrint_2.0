@@ -9133,6 +9133,29 @@ html, body {
 .add-tab:focus-visible { outline: 2px solid var(--shop-blue); outline-offset: 2px; }
 .add-tab .count { min-width: 22px; padding: 1px 7px; border-radius: 999px; background: rgba(0, 0, 0, .08); font-size: 12px; text-align: center; }
 .add-tab.is-active .count { background: rgba(255, 255, 255, .25); }
+.chip-ok { background: #e8f7ef; color: #1a7f4b; font-weight: 600; }
+.printer-advice { margin: 6px 0; padding: 8px 10px; border-radius: 8px; background: #fff4e5; color: #6b4200; font-size: 13px; line-height: 1.4; }
+.ability-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.printer-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.printer-kpi { display: grid; gap: 2px; padding: 12px 14px; border: 1px solid var(--shop-border); border-radius: 10px; background: white; }
+.printer-kpi strong { font-size: 24px; line-height: 1.1; }
+.printer-kpi span { color: var(--shop-text-muted); font-size: 12.5px; }
+.printer-kpi.ok strong { color: #1a7f4b; }
+.printer-kpi.warn strong { color: #b45309; }
+.printer-filters { display: grid; grid-template-columns: minmax(200px, 2fr) minmax(180px, 1fr); gap: 12px; margin-bottom: 12px; }
+.table-wrap .printer-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.printer-item { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--shop-border); border-left-width: 4px; border-radius: 12px; background: white; }
+.printer-item p { margin: 0; }
+.printer-item header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.printer-item.state-ready { border-left-color: #1a7f4b; }
+.printer-item.state-attention { border-left-color: #b42318; }
+.printer-item.state-offline, .printer-item.state-paused { border-left-color: #d68a1a; }
+.printer-state { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; background: #eef0f4; color: #374151; }
+.printer-state.ready { background: #e8f7ef; color: #1a7f4b; }
+.printer-state.attention { background: #fdecec; color: #b42318; }
+.printer-state.offline, .printer-state.paused { background: #fff4e5; color: #8a5200; }
+.printer-warn { color: #b45309; font-weight: 600; }
+@media (max-width: 760px) { .printer-filters { grid-template-columns: 1fr; } }
 .brand-chip { background: #eef3ff; color: var(--shop-blue); font-weight: 700; }
 .chip-warn { background: #fff4e5; color: #8a5200; }
 .network-form { margin-top: 18px; padding: 16px; border: 1px dashed var(--shop-border); border-radius: 12px; background: var(--shop-surface-subtle); display: grid; gap: 10px; }

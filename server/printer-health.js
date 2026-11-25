@@ -56,6 +56,7 @@ export const HEALTH_STATES = Object.freeze({
   toner_low: { label: 'Toner or ink is low', blocking: false },
   unknown: { label: 'Status not reported', blocking: false },
   offline: { label: 'Offline in Windows (cable, power or network)', blocking: true },
+  usb_missing: { label: 'USB cable not detected (unplugged or switched off)', blocking: true },
   error: { label: 'Printer error', blocking: true },
   paper_jam: { label: 'Paper jam', blocking: true },
   paper_out: { label: 'Out of paper', blocking: true },
@@ -70,8 +71,18 @@ export const HEALTH_STATES = Object.freeze({
 });
 
 // code: the numeric/string PrinterStatus Windows returned (null/undefined/'' when it could not be read).
+// Two more facts from the Windows scan sharpen it, because Windows keeps calling an unplugged USB printer "normal":
+//   usbPresent  true / false / null: is the USB device behind a USB00x port attached right now? (null = not a USB port or unknown)
+//   workOffline Windows' "Use Printer Offline" switch, which Windows also turns on by itself when it cannot reach the printer
 // Returns { state, label, blocking, flags }. `blocking` means a job sent now would very likely not print.
-export function classifyPrinterHealth(code) {
+export function classifyPrinterHealth(code, { usbPresent = null, workOffline = false } = {}) {
+  const base = classifyStatusCode(code);
+  if (usbPresent === false) return { state: 'usb_missing', ...HEALTH_STATES.usb_missing, flags: ['No USB device is attached to this printer\'s port', ...base.flags] };
+  if (workOffline === true && !base.blocking) return { state: 'offline', ...HEALTH_STATES.offline, flags: ['Windows is set to "Use Printer Offline"', ...base.flags] };
+  return base;
+}
+
+function classifyStatusCode(code) {
   if (code === null || code === undefined || code === '') return { state: 'unknown', ...HEALTH_STATES.unknown, flags: [] };
   if (typeof code === 'string' && !/^\d+$/.test(code.trim())) {
     const state = BY_NAME[code.trim().toLowerCase().replace(/[\s_-]/g, '')];
@@ -108,6 +119,23 @@ export function evaluateDevice(device, nowMs = Date.now()) {
     connector_online: connectorOnline,
     // May the claim loop offer this printer work? Unknown health does not block (older connectors never report it).
     claimable: connectorOnline && !paused && !blocking
+  };
+}
+
+// What a printer can do, where that knowledge comes from, and whether the owner's setting disagrees with the driver.
+//   source 'driver'     the connector read it from the Windows driver (kept up to date by every scan)
+//   source 'owner'      the owner chose it; the driver's own answer is still remembered so a wrong choice is visible
+//   source 'unverified' nothing was detected and the owner has not chosen: colour and two-sided stay OFF until known
+export function describeAbilities(device) {
+  const colour = Number(device?.color) === 1, twoSided = Number(device?.duplex) === 1;
+  const detected = device?.det_at ? { colour: Number(device.det_color) === 1, two_sided: Number(device.det_duplex) === 1, checked_at: device.det_at } : null;
+  const owner = device?.cap_source === 'manual';
+  const mismatch = { colour: Boolean(detected && owner && detected.colour !== colour), two_sided: Boolean(detected && owner && detected.two_sided !== twoSided) };
+  return {
+    colour, two_sided: twoSided,
+    summary: `${colour ? 'Colour + black & white' : 'Black & white only'} · ${twoSided ? 'Two-sided + one-sided' : 'One-sided only'}`,
+    source: owner ? 'owner' : detected ? 'driver' : 'unverified',
+    detected, mismatch, has_mismatch: mismatch.colour || mismatch.two_sided
   };
 }
 

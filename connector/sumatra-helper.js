@@ -200,13 +200,21 @@ export async function getWindowsPrinters() {
   if (process.platform !== 'win32') return [];
   // Get-Printer has no Default property, so the Windows default printer comes from Win32_Printer.
   // PowerShell can take several seconds to start on a busy shop PC, so allow a generous timeout.
+  //
+  // PrinterStatus alone cannot tell whether a USB printer is plugged in: Windows keeps reporting an unplugged USB printer
+  // as normal. So two more facts are read: WorkOffline ("Use Printer Offline", which Windows also sets itself when it
+  // cannot reach the printer) and UsbPresent, whether the USB device behind a USB00x port is currently attached
+  // (true / false; null when the port is not a USB port or Windows could not enumerate devices).
   const ps = [
-    '$def = (Get-CimInstance -ClassName Win32_Printer -Filter "Default=TRUE" -ErrorAction SilentlyContinue | Select-Object -First 1).Name',
-    '$list = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object Name, PrinterStatus, PortName, DriverName, @{ n = "Default"; e = { $_.Name -eq $def } })',
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    '$def = (Get-CimInstance -ClassName Win32_Printer -Filter "Default=TRUE" | Select-Object -First 1).Name',
+    '$offline = @{}; foreach ($c in @(Get-CimInstance -ClassName Win32_Printer)) { $offline[$c.Name] = [bool]$c.WorkOffline }',
+    '$nodes = $null; try { $nodes = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -like "USBPRINT*" } | ForEach-Object { $_.InstanceId }) } catch { $nodes = $null }',
+    '$list = @(foreach ($p in @(Get-Printer)) { $usb = $null; if (($null -ne $nodes) -and ($p.PortName -match "^USB[0-9]+$")) { $usb = [bool](@($nodes | Where-Object { $_ -like ("*&" + $p.PortName) }).Count) }; [pscustomobject]@{ Name = $p.Name; PrinterStatus = $p.PrinterStatus; PortName = $p.PortName; DriverName = $p.DriverName; Default = ($p.Name -eq $def); WorkOffline = [bool]$offline[$p.Name]; UsbPresent = $usb } })',
     'ConvertTo-Json -Compress -InputObject $list'
   ].join('; ');
   try {
-    const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 20000, windowsHide: true });
+    const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 25000, windowsHide: true });
     if (!stdout || !stdout.trim()) return [];
     const parsed = JSON.parse(stdout);
     return (Array.isArray(parsed) ? parsed : [parsed]).filter(p => p && p.Name);
