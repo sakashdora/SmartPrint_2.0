@@ -1,78 +1,119 @@
 # SmartPrint
 
-QR printing for independent shops, with customer previews, owner/admin workspaces, INR cash payments and direct-to-shop UPI.
+QR-based document printing platform for independent print shops and educational institutions — featuring live document previews, mobile-first uploads, shop/college workspaces, centralized Razorpay & cash payments, and real-time printer dispatch.
 
-## Current setup
+---
 
-- Neon is connected and migrated under the `smartprint` schema. The app uses a separate restricted runtime login. The owner login remains local as `MIGRATION_DATABASE_URL`.
-- Your admin account is created in Neon. Initial credentials are in the ignored local file `.data/admin-access.txt`. The database stores a salted scrypt hash, never the plaintext password.
-- Orders, quotes, encrypted files, payments, prices, sessions and audit records persist in Neon. Tracking and owner queue/transactions check for changes every five seconds.
-- Deployment is prepared for Vercel. You will deploy it yourself. An always-on Windows 10/11 shop PC runs document processing and the printer connector.
+## Key Features
 
-**Verified:** build, eight automated test groups, real Neon transaction checks, restricted runtime privileges, persisted admin hash and desktop/mobile PDF preview.
-**Still requires live validation:** Vercel deployment, Docker/ClamAV/LibreOffice startup and physical output on your printer.
+- **Customer QR Ordering:** Mobile-first upload for PDF, JPG, PNG, and office documents (up to 20 MiB / 100 pages), with live page-range selection, colour/grayscale, duplex, 2-up layout, and ID card front/back pairing.
+- **Image Preparation:** Built-in crop, rotation, blank-border trimming, and contrast/sharpness enhancement.
+- **Workspaces & Multi-Tenant Roles:** Dedicated portals for **Customers**, **Print Shop Owners**, **College/Institution Admins**, and **Platform Admins**.
+- **Payments & Ledgers:** Centralized **Razorpay** (`single_merchant` mode with webhook reconciliation), counter cash/UPI confirmation, immutable transaction ledgers, and CSV exports.
+- **Hardware Print Dispatch:** Persistent long-polling connector (`connector/` & `agent/`) for Windows/local printers with lease tracking, failure recovery, and automatic file deletion after confirmed output.
+- **Security & Privacy:** Argon2id password hashing, TOTP/WebAuthn MFA, AES-256-GCM encrypted file storage, distributed rate limiting, origin validation, and automated retention sweeps.
 
-## Run locally
+---
 
-Requires Node.js 24.x:
+## Tech Stack
+
+- **Runtime:** Node.js 24 (`ESM`) + Express 5
+- **Database:** PostgreSQL ([Neon](https://neon.tech)) in production, SQLite fallback for isolated local demos
+- **Image & PDF:** `sharp`, `pdf-lib`, `pdfjs-dist`, `@napi-rs/canvas`
+- **Frontend:** Vanilla ES modules, PWA (`manifest.json` + service worker), responsive CSS design tokens
+
+---
+
+## Local Development
+
+Requires **Node.js 24.x**:
 
 ```powershell
+# 1. Install dependencies and build static assets
 npm ci
-npm start
-```
-
-Open http://localhost:3000. This loads `.env` and uses Neon. Register a shop, approve it using your admin account, then configure prices, UPI and a printer. With `CONNECTOR_PROCESSING=true`, previews require the shop connector.
-
-> **Development safety.** `npm start` with a remote `DATABASE_URL` in `.env` changes that database. Point development at a separate Neon branch, never the production database. Set `REFUSE_REMOTE_DB_IN_DEV=true` to make a development server refuse to start against any remote database.
-
-For an isolated UI demonstration, stop the real server and run `npm run demo` from a shell without inherited production variables. Demo accounts: `owner@smartprint.local` / `admin@smartprint.local`, password `SmartPrintDemo!2026`. These accounts exist only in local SQLite. Demo processing is unscanned and must stay local.
-
-## Deploy and connect a shop
-
-Follow [Vercel and Windows setup](docs/08-deployment-and-shop-setup.md). Upload only the listed runtime variables to Vercel. Never upload `.env`, `.data`, migration credentials, admin credentials or the processor secret.
-
-Shop owners are reminded to enrol two-factor sign-in when `OWNER_MFA_REQUIRED_FROM` (an ISO date such as `2026-12-01`) is set, and must have it from that date on; unset keeps it optional for owners. Admins always need it in production.
-
-First production sign-in requires authenticator enrollment. Change the initial password in Account settings, save it privately, then remove the local delivery file.
-
-## Included
-
-- Registration, admin approval/suspension, per-shop prices, QR download, UPI settings, printer pairing/revocation.
-- PDF/JPG/PNG and shop-PC conversion of DOCX/PPTX/XLSX. 20 MiB input, 100 pages, A4 output, 100 copies, 40 MiB output limit.
-- Actual original/prepared previews, page navigation, ranges, colour/grayscale, duplex, two-up and card front/back.
-- Image rotation, symmetric crop, blank-border trimming and contrast/sharpness enhancement.
-- Manually verified UPI/cash, immutable collections, all-time gross/refund/net totals, paginated ledger and CSV export.
-- Paid print leases, duplicate-submission protection, uncertain-output review, manual printing, cancellation and manual refund recording.
-- Atomic live-PDF deletion after confirmed physical output; expiry cleanup while receipts remain.
-- Persistent hashed sessions, MFA, distributed rate limits, tenant/role checks, Origin checks, encrypted files, audit events and operator recovery.
-
-A customer's UPI reference never marks payment paid. The shop must verify its own bank credit. Refund recording does not transfer money. Windows spool submission does not prove physical output; the owner confirms it. Mobile uses the responsive website and Windows bridge, not a native silent-print app. Auto-crop is not perspective correction.
-
-## Database changes (migrations)
-
-Schema changes are listed in `server/migrations.js` and recorded in `schema_migrations`. The web process verifies them at startup; **in production it refuses to start if one cannot be applied** (the previous version keeps serving). Apply them first with the database owner login:
-
-```powershell
-npm run migrate    # uses MIGRATION_DATABASE_URL; run it BEFORE deploying a release that adds a migration
-```
-
-`scripts/census.sql` is a read-only report of the database (run it on a restored snapshot or a Neon branch).
-
-## Verify and maintain
-
-```powershell
 npm run build
-npm test
-npm run test:neon
+
+# 2. Configure environment
+cp .env.example .env
+
+# 3. Apply database migrations
+npm run migrate
+
+# 4. Provision an admin account
+$env:ADMIN_PASSWORD="YourStrongPassword123!"
+npm run admin:create
+
+# 5. Start the development server
+npm run dev
+```
+
+Open **http://localhost:3000**.
+
+> **Isolated Local Demo:** Run `npm run demo` (without remote `DATABASE_URL`) to preview with sample SQLite accounts (`owner@smartprint.local` / `admin@smartprint.local`, password `SmartPrintDemo!2026`).
+
+---
+
+## Production Deployment (Render + Neon)
+
+SmartPrint runs best on a persistent Node.js / Docker host such as **Render** (`render.yaml` & `Dockerfile` included) backed by **Neon PostgreSQL**:
+
+1. **Database:** Provision a PostgreSQL database on [Neon](https://neon.tech) and run `npm run migrate`.
+2. **Web Service:** Deploy the `main` branch on [Render](https://render.com) using the **Docker** runtime and Health Check Path `/api/health`.
+3. **Required Environment Variables:**
+   - `NODE_ENV=production`
+   - `PORT=3000`
+   - `DATABASE_URL` — Neon pooled PostgreSQL connection string
+   - `FILE_ENCRYPTION_KEY` — 64-character hex secret *(keep unchanged across deployments)*
+   - `CRON_SECRET` — 64-character hex secret for maintenance sweeps
+4. **Centralized Razorpay (Optional):**
+   - Set `PAYMENT_SETTLEMENT_MODE=single_merchant`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, and `RAZORPAY_LIVE_ENABLED=true` (for live keys).
+   - Point Razorpay Webhooks (`payment.captured`) to `https://<your-domain>/api/payments/webhook`.
+5. **Keep-Alive:** Ping `/readyz` every 5–10 minutes (e.g., via a Cloudflare Worker Cron trigger `*/5 * * * *`) if hosting on a free tier that sleeps on inactivity.
+
+---
+
+## Connecting a Shop Printer
+
+On the Windows PC connected to your printer:
+
+```cmd
+start-connector.bat
+```
+
+Or expose a local instance directly over HTTPS via Cloudflare Tunnel:
+
+```cmd
+start-cloudflare.bat
+```
+
+---
+
+## Verification & Maintenance
+
+```powershell
+npm run check       # JavaScript syntax verification
+npm test            # Full unit & integration test suite
+npm run test:neon   # Live Neon transaction & schema integration check (auto-rolls back)
+npm run env:check   # Verify environment variable presence
 npm audit --omit=dev
 ```
 
-Tests use isolated local databases and no printer. The Neon check rolls back every fixture. `npm run migrate` explicitly uses the migration login; `npm run env:check` prints configuration presence only.
+> Schema migrations live in `server/migrations.js` and are tracked in `schema_migrations`. Always run `npm run migrate` before deploying a release that introduces new migrations.
 
-Keep `FILE_ENCRYPTION_KEY` unchanged across deployments: files and MFA depend on it. Rotate the original Neon owner password exposed in chat before public launch. Live SQL deletion does not erase retained backups or printer spool caches.
+---
 
-[Full PRD and document pack](docs/README.md) · [Launch checklist](docs/06-test-and-release-plan.md) · [Operations](docs/09-operations-and-recovery.md)
+## Documentation
+
+- [Documentation Index](docs/README.md)
+- [Product Requirements](docs/01-product-requirements.md)
+- [Architecture & Data Model](docs/02-architecture-and-data.md)
+- [Security & Privacy](docs/03-security-and-privacy.md)
+- [Test & Release Plan](docs/06-test-and-release-plan.md)
+- [Deployment & Shop Setup](docs/08-deployment-and-shop-setup.md)
+- [Operations & Recovery](docs/09-operations-and-recovery.md)
+
+---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
