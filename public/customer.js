@@ -3,6 +3,33 @@ import { downloadPdf, showDocument, getDocPageCount } from './viewer.js';
 import { waitForQuote } from './preparation.js';
 import { openDocumentEditor } from './crop.js';
 
+// Same rules as the server's print-options.js, so the on-screen page count and price match what is charged.
+export const PAGES_PER_SIDE = { single: 1, two: 2, four: 4, card: 1 };
+export const LAYOUT_NAMES = { single: 'Standard', two: '2 pages on 1', four: '4 pages on 1', card: 'ID Card (Fit)' };
+// range: "" / "all", "odd", "even" or a list like "1-3, 5". total: pages in the source document (null when unknown).
+export function countSelectedPages(range, total) {
+  const word = String(range ?? '').trim().toLowerCase();
+  if (!total) return { count: null, error: null };
+  if (!word || word === 'all') return { count: total, error: null };
+  if (word === 'odd') return { count: Math.ceil(total / 2), error: null };
+  if (word === 'even') return total < 2 ? { count: 0, error: 'This document has only one page, so it has no even pages.' } : { count: Math.floor(total / 2), error: null };
+  const pages = new Set();
+  for (const part of word.split(',')) {
+    const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) return { count: 0, error: 'Type pages like 1-3, 5 — or tap All, Odd or Even.' };
+    const first = Number(match[1]), last = Number(match[2] ?? match[1]);
+    if (first < 1 || last > total || first > last) return { count: 0, error: `Choose pages between 1 and ${total}.` };
+    for (let n = first; n <= last; n++) pages.add(n);
+  }
+  return { count: pages.size, error: null };
+}
+export function estimatePrint(selected, { layout, duplex, copies, color }, rates) {
+  const sidesPerCopy = layout === 'card' ? 1 : Math.ceil(selected / (PAGES_PER_SIDE[layout] || 1));
+  const sides = sidesPerCopy * copies;
+  const sheets = Math.ceil(sidesPerCopy / (duplex ? 2 : 1)) * copies;
+  return { sides, sheets, amount: sides * (color === 'color' ? rates.color : rates.bw) };
+}
+
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
   if (!slug) {
@@ -328,7 +355,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
   const isImage = file => /\.(png|jpe?g)$/i.test(file.name);
   let files = [], originalFiles = [], editedFiles = [], activeDocumentMode = 'original';
-  let quote = null, isCalculating = false, isOrdering = false, knownPageCount = null;
+  let quote = null, isCalculating = false, isOrdering = false, knownPageCount = null, pageTotalKnown = false;
   let revision = 0, calculateTimer, preview, pendingPreparation, sourceRevision = 0;
   let localPreviews = [];
   let preparedQuote;
@@ -603,7 +630,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
             <!-- Layout selection -->
             <div class="option-group option-layout-group">
               <label class="option-group-label">Layout</label>
-              <div class="segmented-control segments-three">
+              <div class="segmented-control segments-four">
                 <label class="segment-btn is-active">
                   <input type="radio" name="layout" value="single" checked class="visually-hidden">
                   <span>Standard</span>
@@ -613,14 +640,34 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
                   <span>2 pages on 1</span>
                 </label>
                 <label class="segment-btn">
+                  <input type="radio" name="layout" value="four" class="visually-hidden">
+                  <span>4 pages on 1</span>
+                </label>
+                <label class="segment-btn">
                   <input type="radio" name="layout" value="card" class="visually-hidden">
                   <span>ID Card (Fit)</span>
                 </label>
               </div>
             </div>
 
-            <!-- Row: Copies, Range, Format -->
-            <div class="options-three-col-row">
+            <!-- Pages to print: one tap for the common choices, or type your own -->
+            <div class="option-group option-pages-group">
+              <label class="option-group-label" for="print-range-input">Pages to print</label>
+              <div class="page-chips" role="group" aria-label="Choose which pages to print">
+                <button type="button" class="page-chip is-active" data-range="">All pages</button>
+                <button type="button" class="page-chip" data-range="1">First page</button>
+                <button type="button" class="page-chip" data-range="1-2">First 2 pages</button>
+                <button type="button" class="page-chip" data-range="odd">Odd pages</button>
+                <button type="button" class="page-chip" data-range="even">Even pages</button>
+              </div>
+              <div class="input-with-icon">
+                <input id="print-range-input" name="range" placeholder="Or type pages, e.g. 1-3, 5" autocomplete="off" maxlength="200">
+              </div>
+              <small class="range-hint" id="range-hint" aria-live="polite">Choose a document to see its page count.</small>
+            </div>
+
+            <!-- Row: Copies, Format -->
+            <div class="options-two-col-row">
               <!-- Copies Stepper -->
               <div class="option-group option-copies-group">
                 <label class="option-group-label" for="copies">Copies</label>
@@ -628,14 +675,6 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
                   <button type="button" class="stepper-btn" data-copy="-1" aria-label="Fewer copies">−</button>
                   <input id="copies" name="copies" type="number" min="1" max="100" value="1" required class="stepper-input">
                   <button type="button" class="stepper-btn" data-copy="1" aria-label="More copies">+</button>
-                </div>
-              </div>
-
-              <!-- Pages to print -->
-              <div class="option-group option-range-group">
-                <label class="option-group-label" for="print-range-input">Pages to print</label>
-                <div class="input-with-icon">
-                  <input id="print-range-input" name="range" placeholder="All pages (e.g. 1-3, 5)">
                 </div>
               </div>
 
@@ -792,14 +831,15 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   const retryButton = document.querySelector('#retry-quote');
 
   function updateInstantPriceDisplay() {
-    const pCount = knownPageCount ?? quote?.pages;
-    if (!pCount || !files.length) return;
+    const total = knownPageCount ?? quote?.pages;
+    if (!total || !files.length) { syncPageChoices(null); return; }
     const settings = readOptions();
-    const sidesPerCopy = settings.layout === 'card' ? 1 : Math.ceil(pCount / (settings.layout === 'two' ? 2 : 1));
-    const sides = sidesPerCopy * settings.copies;
-    const sheets = Math.ceil(sidesPerCopy / (settings.duplex ? 2 : 1)) * settings.copies;
-    const rate = settings.color === 'color' ? (shop.color ?? 1000) : (shop.bw ?? 200);
-    const amount = sides * rate;
+    // Count only the pages the customer chose; if the total is a guess (office files are counted on the server) or the
+    // range is not valid yet, fall back to the whole document and let the server quote give the exact figure.
+    const chosen = pageTotalKnown ? countSelectedPages(settings.range, total) : { count: null, error: null };
+    syncPageChoices(pageTotalKnown ? total : null, chosen);
+    const pCount = chosen.count ? chosen.count : total;
+    const { sides, sheets, amount } = estimatePrint(pCount, settings, { color: shop.color ?? 1000, bw: shop.bw ?? 200 });
 
     const specPages = document.querySelector('#spec-pages');
     if (specPages) specPages.textContent = String(pCount);
@@ -821,7 +861,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     const sidesEl = document.querySelector('#summary-spec-sides');
     if (sidesEl) sidesEl.textContent = options.duplex ? 'Both sides (Duplex)' : 'One-sided';
     const layoutEl = document.querySelector('#summary-spec-layout');
-    if (layoutEl) layoutEl.textContent = options.layout === 'card' ? 'ID Card (Fit)' : options.layout === 'two' ? '2 pages on 1' : 'Standard';
+    if (layoutEl) layoutEl.textContent = LAYOUT_NAMES[options.layout] || 'Standard';
     const copiesEl = document.querySelector('#spec-copies');
     if (copiesEl) copiesEl.textContent = String(options.copies);
     updateInstantPriceDisplay();
@@ -867,6 +907,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     const banner = document.querySelector('#doc-edit-active-banner');
     if (banner) banner.hidden = true;
     knownPageCount = originalFiles.every(isImage) ? originalFiles.length : knownPageCount;
+    if (originalFiles.every(isImage)) pageTotalKnown = true;
     updateFileMetaDisplay();
     updateInstantPriceDisplay();
     scheduleQuote();
@@ -898,6 +939,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       }
     }
     knownPageCount = editedFiles.every(isImage) ? editedFiles.length : 1;
+    pageTotalKnown = editedFiles.every(isImage);
     updateFileMetaDisplay();
     updateInstantPriceDisplay();
     scheduleQuote();
@@ -1082,6 +1124,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
           localPreviews.push(view);
           if (view?.numPages) {
             knownPageCount = view.numPages;
+            pageTotalKnown = true;
             updateInstantPriceDisplay();
           }
         }
@@ -1144,6 +1187,30 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       range: String(data.get('range') || '').trim()
     };
   }
+
+  // "Printing 3 of 12 pages" under the page choices, and the chosen chip highlighted. total null = not known yet.
+  function syncPageChoices(total, chosen = { count: null, error: null }) {
+    const range = String(form.elements.range?.value ?? '').trim().toLowerCase();
+    const current = range === 'all' ? '' : range.replace(/\s+/g, '');
+    form.querySelectorAll('.page-chip').forEach(chip => {
+      chip.classList[chip.dataset.range === current ? 'add' : 'remove']('is-active');
+      const needs = chip.dataset.range === '1-2' || chip.dataset.range === 'even' ? 2 : 1;
+      chip.disabled = Boolean(total) && total < needs;
+    });
+    const hint = document.querySelector('#range-hint');
+    if (!hint) return;
+    hint.classList[chosen.error ? 'add' : 'remove']('is-error');
+    hint.textContent = chosen.error ? chosen.error
+      : !total ? 'Choose a document to see its page count.'
+      : chosen.count === total ? `Printing all ${total} page${total === 1 ? '' : 's'}.`
+      : `Printing ${chosen.count} of ${total} pages.`;
+  }
+  form.querySelectorAll('.page-chip').forEach(chip => {
+    chip.onclick = () => {
+      form.elements.range.value = chip.dataset.range;
+      form.elements.range.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+  });
 
   form.querySelectorAll('[data-copy]').forEach(button => {
     button.onclick = () => {
@@ -1255,6 +1322,18 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   async function recalculateQuote() {
     if (!files.length || isCalculating || isOrdering) return;
     if (!form.reportValidity()) return;
+    // A page choice we already know is impossible (e.g. pages 5-40 of a 12-page file) is explained here instead of
+    // being sent to the server to fail.
+    const badRange = pageTotalKnown && knownPageCount ? countSelectedPages(readOptions().range, knownPageCount).error : null;
+    if (badRange) {
+      quote = null;
+      placeBtn.disabled = previewButton.disabled = true;
+      orderStatusText.textContent = 'Fix the pages to print';
+      orderStatusText.className = 'badge pending';
+      document.querySelector('#total-amount').textContent = '—';
+      document.querySelector('#price-subnote').textContent = badRange;
+      return;
+    }
     const generation = revision;
     const selectedFiles = files;
     isCalculating = true;
@@ -1291,7 +1370,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       pendingPreparation = null;
       if (generation !== revision || !form.isConnected) return;
       quote = result;
-      knownPageCount = result.pages;
+      // With no page range the quote's page count is the document's total; with a range it is only the chosen pages.
+      if (!settings.range) { knownPageCount = result.pages; pageTotalKnown = true; }
       document.querySelector('#spec-pages').textContent = String(result.pages);
       document.querySelector('#spec-sheets').textContent = String(result.sheets);
       document.querySelector('#spec-copies').textContent = String(settings.copies);
@@ -1418,6 +1498,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         editedFiles = [];
         activeDocumentMode = 'original';
         knownPageCount = null;
+        pageTotalKnown = false;
         dropzone.hidden = false;
         fileDisplay.hidden = true;
         const editorCard = document.querySelector('#document-editor-card');
@@ -1451,18 +1532,22 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
     if (files.every(isImage)) {
       knownPageCount = files.length;
+      pageTotalKnown = true;
       updateInstantPriceDisplay();
     } else if (/\.pdf$/i.test(files[0]?.name || '')) {
       knownPageCount = 1;
+      pageTotalKnown = false;
       updateInstantPriceDisplay();
       getDocPageCount(files[0]).then(count => {
         if (count) {
           knownPageCount = count;
+          pageTotalKnown = true;
           updateInstantPriceDisplay();
         }
       }).catch(() => {});
     } else {
       knownPageCount = 1;
+      pageTotalKnown = false;
       updateInstantPriceDisplay();
     }
 

@@ -1,4 +1,4 @@
-import { selectedPages } from './print-options.js';
+import { selectedPages, PAGES_PER_SIDE } from './print-options.js';
 export { validateOptions, selectedPages, price } from './print-options.js';
 import { PDFDocument } from 'pdf-lib';
 
@@ -64,12 +64,17 @@ export async function prepare(files, options) {
   const output = await PDFDocument.create();
   await source.flush();
   const embedded = await output.embedPages(selection.map(i => source.getPage(i)));
-  const perSide = options.layout === 'single' ? 1 : 2;
+  const perSide = options.layout === 'card' ? 2 : PAGES_PER_SIDE[options.layout];
+  // A4 portrait with a 24 pt margin; four-up is a 2 x 2 grid read left to right, top to bottom, with a 12 pt gutter.
+  const margin = 24, gutter = 12, cellW = (595.28 - 2 * margin - gutter) / 2, cellH = (841.89 - 2 * margin - gutter) / 2;
+  const boxFor = j => options.layout === 'card' ? { x: 60, y: 550 - j * 185, w: 242.65, h: 153.07 }
+    : options.layout === 'four' ? { x: margin + (j % 2) * (cellW + gutter), y: margin + (1 - Math.floor(j / 2)) * (cellH + gutter), w: cellW, h: cellH }
+    : { x: 24, y: perSide === 1 ? 24 : 433 - j * 409, w: 547.28, h: perSide === 1 ? 793.89 : 385 };
   for (let i = 0; i < embedded.length; i += perSide) {
     const page = output.addPage([595.28, 841.89]);
     for (let j = 0; j < perSide && embedded[i + j]; j++) {
       const item = embedded[i + j];
-      const box = options.layout === 'card' ? { x: 60, y: 550 - j * 185, w: 242.65, h: 153.07 } : { x: 24, y: perSide === 1 ? 24 : 433 - j * 409, w: 547.28, h: perSide === 1 ? 793.89 : 385 };
+      const box = boxFor(j);
       const scale = Math.min(box.w / item.width, box.h / item.height);
       page.drawPage(item, { x: box.x + (box.w - item.width * scale) / 2, y: box.y + (box.h - item.height * scale) / 2, width: item.width * scale, height: item.height * scale });
     }
