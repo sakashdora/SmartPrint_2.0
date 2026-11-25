@@ -9124,3 +9124,26 @@ html, body {
   .options-two-col-row { grid-template-columns: 1fr; }
   .page-chip { flex: 1 1 calc(50% - 8px); }
 }
+
+/* ---- Printers page: add a printer (USB / Wi-Fi tabs, brand chips, add by address) ---- */
+.add-tabs { display: flex; gap: 8px; margin: 14px 0 10px; flex-wrap: wrap; }
+.add-tab { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; padding: 8px 16px; border-radius: 10px; border: 1px solid var(--shop-border); background: white; color: var(--shop-text-muted); font: inherit; font-weight: 700; cursor: pointer; }
+.add-tab:hover { color: var(--shop-text-primary); border-color: var(--shop-blue); }
+.add-tab.is-active { background: var(--shop-blue); border-color: var(--shop-blue); color: white; }
+.add-tab:focus-visible { outline: 2px solid var(--shop-blue); outline-offset: 2px; }
+.add-tab .count { min-width: 22px; padding: 1px 7px; border-radius: 999px; background: rgba(0, 0, 0, .08); font-size: 12px; text-align: center; }
+.add-tab.is-active .count { background: rgba(255, 255, 255, .25); }
+.brand-chip { background: #eef3ff; color: var(--shop-blue); font-weight: 700; }
+.chip-warn { background: #fff4e5; color: #8a5200; }
+.network-form { margin-top: 18px; padding: 16px; border: 1px dashed var(--shop-border); border-radius: 12px; background: var(--shop-surface-subtle); display: grid; gap: 10px; }
+.network-form h3 { margin: 0; font-size: 16px; }
+.network-form-grid { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(220px, 2fr) minmax(150px, 1fr); gap: 12px; align-items: end; }
+.network-result { min-height: 1.4em; }
+.network-ok { color: #1a7f4b; font-weight: 600; margin: 0; }
+.network-error { color: var(--shop-red); font-weight: 600; margin: 0; }
+.admin-command { display: grid; gap: 8px; margin-top: 8px; padding: 10px; border-radius: 8px; background: #111827; color: #e5e7eb; }
+.admin-command code { overflow-wrap: anywhere; font-size: 12.5px; user-select: all; }
+@media (max-width: 760px) {
+  .network-form-grid { grid-template-columns: 1fr; }
+  .add-tab { flex: 1 1 100%; justify-content: center; }
+}

@@ -215,7 +215,26 @@ export async function getWindowsPrinters() {
   }
 }
 
-export async function printPdfToWindowsPrinter({ pdfPath, printerName, options = {}, sumatraPath = null }) {
+// Which Windows printer a job goes to. Normally a missing or offline printer is replaced by a similar one (a USB printer
+// moved to another socket comes back as "... (Copy 1)"). With several printers on one PC that would send a colour job
+// meant for one printer to another, so `strict` uses exactly the named printer or fails with a clear message.
+export function selectPrintTarget(printerName, installed, { strict = false } = {}) {
+  if (strict) {
+    const exact = installed.find(p => p?.Name && p.Name.toLowerCase() === String(printerName ?? '').toLowerCase());
+    if (!exact) throw new Error(`Printer "${printerName}" is not installed in Windows on this PC. Install its driver, print a Windows test page, then reconnect it in SmartPrint.`);
+    if (checkPrinterStatus(exact.PrinterStatus).isOffline) throw new Error(`Printer "${exact.Name}" is Offline in Windows (Port: ${exact.PortName || 'Unknown'}). Check its power and cable or WiFi connection.`);
+    return { name: exact.Name, status: 'Ready', switched: false };
+  }
+  const resolution = pickPrinter(printerName, installed);
+  if (!resolution.name) throw new Error(`${resolution.reason} Install the printer driver and print a Windows test page first.`);
+  if (resolution.status === 'Offline') {
+    const port = installed.find(p => p.Name === resolution.name)?.PortName;
+    throw new Error(`Printer "${resolution.name}" is Offline in Windows (Port: ${port || 'Unknown'}). Check the USB cable and power. If the cable was moved to another USB socket, open Printer properties > Ports and tick the active USB00x port.`);
+  }
+  return resolution;
+}
+
+export async function printPdfToWindowsPrinter({ pdfPath, printerName, options = {}, sumatraPath = null, strict = false }) {
   if (!existsSync(pdfPath)) {
     throw new Error(`Print file not found at ${pdfPath}`);
   }
@@ -225,14 +244,9 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
     if (installed.length) {
       // Re-resolved for every job: a USB printer moved to another socket (common with the HP LaserJet
       // 1020/P1108) is reinstalled by Windows as "... (Copy 1)" on a new USB port.
-      const resolution = pickPrinter(printerName, installed);
-      if (!resolution.name) throw new Error(`${resolution.reason} Install the printer driver and print a Windows test page first.`);
+      const resolution = selectPrintTarget(printerName, installed, { strict });
       if (resolution.switched) console.log(`[Print Helper] ${resolution.reason}`);
       targetPrinter = resolution.name;
-      if (resolution.status === 'Offline') {
-        const port = installed.find(p => p.Name === targetPrinter)?.PortName;
-        throw new Error(`Printer "${targetPrinter}" is Offline in Windows (Port: ${port || 'Unknown'}). Check the USB cable and power. If the cable was moved to another USB socket, open Printer properties > Ports and tick the active USB00x port.`);
-      }
     }
   }
 

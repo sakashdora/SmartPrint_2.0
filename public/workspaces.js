@@ -28,65 +28,114 @@ const abilityPicker = ({ color, duplex, scope, id = '', disabled = false }) => `
   <label class="small">Prints <select data-ability="color" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${color ? '' : 'selected'}>Black &amp; white only</option><option value="true" ${color ? 'selected' : ''}>Colour</option></select></label>
   <label class="small">Sides <select data-ability="duplex" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${duplex ? '' : 'selected'}>One-sided only</option><option value="true" ${duplex ? 'selected' : ''}>Two-sided (automatic)</option></select></label></div>`;
 
+const BRANDS = ['HP', 'Brother', 'Epson', 'Canon'];
+// Official maker support pages, where the owner downloads the Windows driver. SmartPrint never installs a driver itself.
+const SUPPORT = { HP: 'https://support.hp.com/in-en/drivers/printers', Brother: 'https://support.brother.com/', Epson: 'https://epson.com/support', Canon: 'https://in.canon/en/support' };
+let addTab = 'usb'; // which "add a printer" tab is open; kept across the page's automatic refreshes
+const sameName = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+const supportLinks = () => `<p class="muted small">Need the driver? Download it from the maker, install it, then click <strong>Scan again</strong>: ${BRANDS.map(b => `<a href="${SUPPORT[b]}" target="_blank" rel="noopener noreferrer">${b}</a>`).join(' · ')}.</p>`;
+const connectionChip = p => p.isWifi ? '📶 Wi-Fi / network' : p.isWired ? '🔌 USB cable' : '🖨️ Local port';
+
+function printerCard(p, pc, devices, escape) {
+  const link = (pc.linkedPrinters || []).find(l => sameName(l.name, p.name));
+  const device = devices.find(d => d.active && sameName(d.name, p.name));
+  const here = Boolean(pc.linkedHere && link);
+  const ready = here && !link.authFailed && isOnline(device);
+  const maker = p.manufacturer && p.manufacturer !== 'Other' ? p.manufacturer : '';
+  const offline = p.status === 'Offline';
+  return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}" data-printer="${escape(p.name)}">
+    <div class="scanned-card-header">
+      <div class="scanned-icon ${p.isWifi ? 'icon-wifi' : p.isWired ? 'icon-wired' : 'icon-printer'}">${p.isWifi ? '📶' : p.isWired ? '🔌' : '🖨️'}</div>
+      <div class="scanned-title-box">
+        <div class="scanned-title-row"><strong>${escape(p.name)}</strong>${maker ? `<span class="chip brand-chip">${escape(maker)}</span>` : ''}${p.isDefault ? '<span class="chip chip-gold">Windows default</span>' : ''}</div>
+        <span class="connection-label ${p.isWifi ? 'label-wifi' : p.isWired ? 'label-wired' : 'label-virtual'}">${connectionChip(p)} · Port ${escape(p.portName || '?')}</span>
+      </div>
+    </div>
+    <div class="scanned-meta">
+      <span class="chip">${escape(p.driverName || 'Windows driver')}</span>
+      <span class="chip ${offline ? 'chip-warn' : ''}">${offline ? '⚠ Offline in Windows' : escape(p.windowsStateLabel || p.status || 'Ready')}</span>
+    </div>
+    ${offline ? `<p class="muted small">${p.isWifi ? 'Windows cannot reach this printer. Switch it on, make sure it is on the same Wi-Fi as this PC, or add it again by its address below.' : 'Windows reports this printer offline. Check the USB cable and power.'}</p>` : ''}
+    ${abilityPicker({ color: p.color, duplex: p.duplex, scope: 'scan', disabled: ready })}
+    ${p.verified ? '<p class="muted small">Pre-filled from the printer driver. Change it if your printer is different.</p>' : '<p class="muted small">The driver did not say what this printer can do. Choose below before connecting.</p>'}
+    <div class="scanned-actions">
+      ${ready ? `<span class="badge active"><span class="live-dot dot-online"></span> Connected &amp; online</span>
+        <button class="secondary small" data-test-print="${device.id}">Test print</button>
+        <button class="danger small" data-disconnect-local="${escape(p.name)}" data-device="${device.id}">Disconnect</button>`
+        : here && !link.authFailed && device ? '<span class="badge pending">Connecting… waiting for the connector</span>'
+        : `<button class="primary small" data-connect-local="${escape(p.name)}">${link?.authFailed ? '⚡ Reconnect this printer' : '⚡ Connect this printer'}</button>`}
+    </div>
+  </div>`;
+}
+
+// Add a network printer by its address. The driver must already be installed in Windows: it is chosen from that list.
+function networkForm(pc, escape) {
+  const drivers = (pc.drivers || []).filter(d => d && typeof d.name === 'string');
+  const groups = [...new Set(drivers.map(d => d.manufacturer || 'Other'))].sort((a, b) => (a === 'Other') - (b === 'Other') || a.localeCompare(b));
+  return `<form id="add-network-printer" class="network-form" autocomplete="off" novalidate>
+    <h3>Printer not in the list? Add it by its address</h3>
+    <p class="muted small">Find the printer's address on its screen, or print a network configuration page from it (for example <strong>192.168.1.50</strong>). The printer must be switched on and on the same Wi-Fi or network as this PC.</p>
+    <div class="network-form-grid">
+      <label class="field">Printer address<input name="ip" required placeholder="192.168.1.50" inputmode="decimal" maxlength="15"></label>
+      <label class="field">Installed driver
+        <select name="driver" required ${drivers.length ? '' : 'disabled'}>
+          <option value="">${drivers.length ? 'Choose the driver for this printer…' : 'No printer driver found'}</option>
+          ${groups.map(g => `<optgroup label="${escape(g)}">${drivers.filter(d => (d.manufacturer || 'Other') === g).map(d => `<option value="${escape(d.name)}">${escape(d.name)}</option>`).join('')}</optgroup>`).join('')}
+        </select>
+      </label>
+      <label class="field">Name (optional)<input name="name" maxlength="100" placeholder="Front desk printer"></label>
+    </div>
+    ${drivers.length ? '' : '<p class="notice-inline">No printer driver is installed yet. Install the one for your printer from the maker, then click Scan again.</p>'}
+    ${supportLinks()}
+    <div class="actions"><button type="button" class="secondary small" id="probe-printer">Test connection</button><button type="submit" class="primary small" ${drivers.length ? '' : 'disabled'}>Add printer</button></div>
+    <div id="network-result" class="network-result" role="status" aria-live="polite"></div>
+  </form>`;
+}
+
 function thisPcSection(pc, devices, reported, escape) {
   if (!pc) {
     return `<section class="panel scanner-panel" id="this-pc">
       <div class="panel-heading"><div>
         <div class="hero-badge">THIS COMPUTER</div>
         <h2>SmartPrint connector is not running on this computer</h2>
-        <p class="muted">Open this page on the Windows PC your printer is plugged into (USB cable) or on the same WiFi as the printer.</p>
+        <p class="muted">Open this page on the Windows PC your printers are plugged into (USB cable) or on the same Wi-Fi as the printers.</p>
       </div></div>
       <ol class="muted">
-        <li>Install the printer's Windows driver and print a Windows test page.</li>
+        <li>Install each printer's Windows driver and print a Windows test page.</li>
         <li>In the SmartPrint folder, run <strong>scripts\\install-connector-task.bat</strong> once. It starts the connector now, at every sign-in, and again within 2 minutes whenever it stops (for example after the laptop sleeps).</li>
         <li>This page updates by itself when the connector is running. If the browser asks to access devices on your local network, choose <strong>Allow</strong>.</li>
       </ol>
+      ${supportLinks()}
       <div class="actions"><button class="primary small" id="check-connector">🔄 Check again</button></div>
       ${reported.length ? `<p class="muted small" style="margin-top:16px">Printers reported by your shop PC: ${reported.map(p => escape(p.name)).join(', ')}. Open this page on that PC to connect one.</p>` : ''}
     </section>`;
   }
   const notice = pc.needsRelink
-    ? '<p class="notice-inline">This PC\'s connector was disconnected from SmartPrint (its device key is no longer valid). Click <strong>Connect</strong> on your printer to link it again.</p>'
+    ? '<p class="notice-inline">This PC\'s connector was disconnected from SmartPrint (its device keys are no longer valid). Click <strong>Reconnect</strong> on each printer to link it again.</p>'
     : pc.linked && !pc.linkedHere
-      ? `<p class="notice-inline">This PC's connector currently prints for <strong>${escape(pc.server)}</strong>. Connecting a printer here moves it to this shop.</p>`
+      ? `<p class="notice-inline">This PC's connector currently prints for <strong>${escape(pc.server)}</strong>. Connecting a printer here moves this PC to this shop.</p>`
       : '';
-  const cards = pc.printers.map(p => {
-    const device = devices.find(d => d.active && d.name.toLowerCase() === p.name.toLowerCase());
-    const here = pc.linkedHere && pc.printer.toLowerCase() === p.name.toLowerCase();
-    const ready = here && isOnline(device);
-    const label = p.isWired ? '🔌 USB cable' : p.isWifi ? '📶 WiFi / network' : '🖨️ Local port';
-    return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}">
-      <div class="scanned-card-header">
-        <div class="scanned-icon ${p.isWifi ? 'icon-wifi' : p.isWired ? 'icon-wired' : 'icon-printer'}">${p.isWifi ? '📶' : p.isWired ? '🔌' : '🖨️'}</div>
-        <div class="scanned-title-box">
-          <div class="scanned-title-row"><strong>${escape(p.name)}</strong>${p.isDefault ? '<span class="chip chip-gold">Windows default</span>' : ''}</div>
-          <span class="connection-label ${p.isWifi ? 'label-wifi' : p.isWired ? 'label-wired' : 'label-virtual'}">${label} · Port ${escape(p.portName || '?')}</span>
-        </div>
-      </div>
-      <div class="scanned-meta">
-        <span class="chip">${escape(p.driverName || 'Windows driver')}</span>
-        <span class="chip">${p.status === 'Offline' ? '⚠ Offline in Windows' : escape(p.status || 'Ready')}</span>
-      </div>
-      ${p.status === 'Offline' ? '<p class="muted small">Windows reports this printer offline. Check the cable and power, or use the copy of this printer that is Ready.</p>' : ''}
-      ${abilityPicker({ color: p.color, duplex: p.duplex, scope: 'scan' })}
-      ${p.verified ? '<p class="muted small">Pre-filled from the printer driver. Change it if your printer is different.</p>' : '<p class="muted small">The driver did not say what this printer can do. Choose below before connecting.</p>'}
-      <div class="scanned-actions">
-        ${ready ? `<span class="badge active"><span class="live-dot dot-online"></span> Connected &amp; online</span>
-          <button class="secondary small" data-test-print="${device.id}">Test print</button>`
-          : here && device ? '<span class="badge pending">Connecting… waiting for the connector</span>'
-          : `<button class="primary small" data-connect-local="${escape(p.name)}">⚡ Connect this printer</button>`}
-      </div>
-    </div>`;
-  }).join('');
+  const usb = pc.printers.filter(p => !p.isWifi), wifi = pc.printers.filter(p => p.isWifi);
+  const tab = addTab === 'network' ? 'network' : 'usb';
+  const list = tab === 'network' ? wifi : usb;
   return `<section class="panel scanner-panel" id="this-pc">
     <div class="panel-heading"><div>
       <div class="hero-badge">THIS COMPUTER</div>
-      <h2>Printers on this PC</h2>
-      <p class="muted">Read directly from Windows by the SmartPrint connector. Connect the printer you use for customer jobs.</p>
+      <h2>Add a printer</h2>
+      <p class="muted">Connect as many printers as your shop uses. HP, Brother, Epson, Canon and others, by USB cable or Wi-Fi. Each one prints only the jobs it can do.</p>
     </div>
     <div class="actions"><button class="secondary small" id="rescan-printers">🔄 Scan again</button></div></div>
     ${notice}
-    ${pc.printers.length ? `<div class="scanned-printers-grid">${cards}</div>` : '<p class="notice-inline">No printer is installed in Windows on this PC. Plug in the printer, install its driver, print a Windows test page, then click Scan again.</p>'}
+    <div class="add-tabs" role="tablist" aria-label="How is the printer connected?">
+      <button type="button" role="tab" class="add-tab ${tab === 'usb' ? 'is-active' : ''}" aria-selected="${tab === 'usb'}" data-add-tab="usb">🔌 USB cable <span class="count">${usb.length}</span></button>
+      <button type="button" role="tab" class="add-tab ${tab === 'network' ? 'is-active' : ''}" aria-selected="${tab === 'network'}" data-add-tab="network">📶 Wi-Fi / network <span class="count">${wifi.length}</span></button>
+    </div>
+    ${tab === 'usb'
+      ? `<p class="muted small">Plug the printer into this PC and switch it on. If it is not listed, install its driver first.</p>${supportLinks()}`
+      : '<p class="muted small">Printers already set up on this PC over Wi-Fi or the network are listed below.</p>'}
+    ${list.length ? `<div class="scanned-printers-grid">${list.map(p => printerCard(p, pc, devices, escape)).join('')}</div>`
+      : `<p class="notice-inline">${tab === 'network' ? 'No Wi-Fi or network printer is installed on this PC yet.' : 'No USB printer is installed in Windows on this PC.'} ${tab === 'network' ? 'Add one by its address below.' : 'Plug it in, install its driver, print a Windows test page, then click Scan again.'}</p>`}
+    ${tab === 'network' ? networkForm(pc, escape) : ''}
   </section>`;
 }
 
@@ -94,7 +143,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
   const [devices, reported, pc] = await Promise.all([
     api('/api/owner/devices'),
     api('/api/owner/printers/scan').catch(() => []),
-    connectorCall(freshScan ? '/status?fresh=1' : '/status').catch(() => null)
+    connectorCall(freshScan ? '/status?fresh=1&drivers=1' : '/status?drivers=1').catch(() => null)
   ]);
   freshScan = false;
   const active = devices.filter(d => d.active);
@@ -102,8 +151,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
 
   workspace(`<div class="workhead">
     <div>
-      <h1>Connect your printer</h1>
-      <p class="muted">USB and WiFi printers installed in Windows on your shop PC: Brother, HP, Canon, Epson and others.</p>
+      <h1>Your printers</h1>
+      <p class="muted">Connect as many USB and Wi-Fi printers as your shop uses: HP, Brother, Epson, Canon and others.</p>
     </div>
     <div class="actions"><span class="badge ${onlineCount ? 'active' : 'pending'}">${onlineCount} of ${active.length} online</span></div>
   </div>
@@ -117,11 +166,13 @@ export async function printersPage({ api, workspace, escape, notify }) {
     </div></div>
     ${devices.length ? `<div class="printer-cards-grid">${devices.map(d => {
       const online = isOnline(d);
+      const known = [...(pc?.printers || []), ...reported].find(p => sameName(p.name, d.name));
+      const kind = (d.manufacturer && d.manufacturer !== 'Other' ? `<span class="chip brand-chip">${escape(d.manufacturer)}</span>` : '') + (known ? `<span class="chip">${connectionChip(known)}</span>` : '');
       return `<div class="printer-card ${online ? 'is-online' : 'is-offline'} ${d.is_paused ? 'is-paused' : ''}">
         <div class="printer-card-top">
           <div class="printer-title">
             <span class="live-dot ${online ? (d.is_paused ? 'dot-paused' : 'dot-online') : 'dot-offline'}"></span>
-            <strong>${escape(d.name)}</strong>
+            <strong>${escape(d.name)}</strong>${kind}
           </div>
           <span class="badge ${!d.active ? 'cancelled' : d.is_paused ? 'pending' : online ? (d.health?.blocking ? 'cancelled' : d.health?.verified ? 'active' : 'pending') : 'pending'}">${!d.active ? 'Disconnected' : d.is_paused ? 'Paused' : online ? (d.health?.blocking ? 'Needs attention' : d.health?.verified ? 'Online & ready' : 'Connected · status unverified') : 'Offline'}</span>
         </div>
@@ -144,6 +195,63 @@ export async function printersPage({ api, workspace, escape, notify }) {
     event.currentTarget.textContent = 'Scanning…';
     freshScan = true;
     rerender();
+  });
+
+  document.querySelectorAll('[data-add-tab]').forEach(button => button.onclick = () => { addTab = button.dataset.addTab; rerender(); });
+
+  // Add a network printer by address (Windows creates the port and printer using a driver that is already installed).
+  const networkFormEl = document.querySelector('#add-network-printer');
+  if (networkFormEl) {
+    const result = networkFormEl.querySelector('#network-result');
+    const show = (message, { ok = false, command = '' } = {}) => {
+      result.replaceChildren();
+      const line = document.createElement('p');
+      line.className = ok ? 'network-ok' : 'network-error';
+      line.textContent = message;
+      result.append(line);
+      if (command) {
+        const box = document.createElement('div'), code = document.createElement('code'), copy = document.createElement('button');
+        box.className = 'admin-command'; code.textContent = command;
+        copy.type = 'button'; copy.className = 'secondary small'; copy.textContent = 'Copy command';
+        copy.onclick = async () => { try { await navigator.clipboard.writeText(command); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the text and copy it'; } };
+        box.append(code, copy); result.append(box);
+      }
+    };
+    const values = () => Object.fromEntries(new FormData(networkFormEl));
+    networkFormEl.querySelector('#probe-printer').onclick = async event => {
+      const button = event.currentTarget;
+      button.disabled = true; show('Checking…');
+      try {
+        const found = await connectorCall('/probe', { method: 'POST', body: { ip: values().ip } });
+        show(found.reachable
+          ? `Something answered at ${found.ip} (${found.ports.map(p => `${p.label}, port ${p.port}`).join('; ')}). Choose the driver and click Add printer.`
+          : `Nothing answered at ${found.ip}. Check that the printer is switched on, is on the same Wi-Fi as this PC, and that the address is right.`, { ok: found.reachable });
+      } catch (error) { show(error.message); } finally { button.disabled = false; }
+    };
+    networkFormEl.onsubmit = async event => {
+      event.preventDefault();
+      const button = networkFormEl.querySelector('[type=submit]');
+      button.disabled = true; show('Adding the printer in Windows…');
+      try {
+        const { ip, driver, name } = values();
+        const added = await connectorCall('/network-printer', { method: 'POST', body: { ip, driver, name } });
+        freshScan = true;
+        notify(`${added.printer} was added to Windows. Press Connect on its card to start using it.`);
+        await rerender();
+      } catch (error) { show(error.message, { command: error.data?.command }); button.disabled = false; }
+    };
+  }
+
+  document.querySelectorAll('[data-disconnect-local]').forEach(button => button.onclick = async () => {
+    const name = button.dataset.disconnectLocal;
+    if (!confirm(`Disconnect ${name}? Your other printers stay connected.`)) return;
+    button.disabled = true;
+    try {
+      await api(`/api/owner/devices/${button.dataset.device}`, { method: 'DELETE' });
+      await connectorCall('/unpair', { method: 'POST', body: { printer: name } }).catch(() => {});
+      notify(`${name} was disconnected.`);
+    } catch (error) { notify(error.message); }
+    await rerender();
   });
 
   document.querySelectorAll('[data-connect-local]').forEach(button => button.onclick = async () => {
@@ -211,7 +319,9 @@ export async function printersPage({ api, workspace, escape, notify }) {
   document.querySelectorAll('[data-revoke]').forEach(button => button.onclick = async () => {
     if (!confirm('Disconnect this printer? Its connector stops receiving jobs until you connect it again.')) return;
     try {
+      const device = devices.find(d => d.id === button.dataset.revoke);
       await api(`/api/owner/devices/${button.dataset.revoke}`, { method: 'DELETE' });
+      if (device && (pc?.linkedPrinters || []).some(l => sameName(l.name, device.name))) await connectorCall('/unpair', { method: 'POST', body: { printer: device.name } }).catch(() => {});
       await rerender();
     } catch (error) {
       notify(error.message);
@@ -225,7 +335,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
   watchUpdates(
     () => Promise.all([api('/api/owner/devices'), api('/api/owner/printers/scan').catch(() => []), connectorState()]),
     [devices, reported, pcState],
-    () => document.activeElement?.matches?.('.scanned-card select') ? undefined : rerender(), // do not wipe a choice the owner is making
+    () => document.activeElement?.closest?.('.scanned-card select, #add-network-printer') ? undefined : rerender(), // do not wipe a choice the owner is making
     5000
   );
 }

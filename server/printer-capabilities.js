@@ -29,12 +29,36 @@ export function isVirtualPrinter({ name = '', port = '', driver = '' } = {}) {
   return VIRTUAL_NAME.test(name) || VIRTUAL_NAME.test(driver) || VIRTUAL_PORT.test(String(port).trim());
 }
 
-// Port naming used by Windows and the vendor port monitors (HP, Brother, Canon, Epson).
+// The company that made a printer, from its Windows name or driver. Used only to label cards and suggest the right
+// support page; it never selects or installs a driver.
+const MAKERS = [
+  ['HP', /\bHP\b|hewlett|laserjet|deskjet|officejet|photosmart|pagewide|\benvy\b|\bsmart tank\b/i],
+  ['Brother', /brother|\b(DCP|MFC|HL|MFC)-[A-Z]?\d|\bBRN|\bBRW/i],
+  ['Epson', /epson|ecotank|workforce|expression|surecolor|\bET-\d|\bL\d{3,4}\b/i],
+  ['Canon', /canon|pixma|maxify|imageclass|selphy|\bLBP\d|\bi-sensys|\bG\d{4}\b/i],
+  ['Samsung', /samsung|\bML-\d|\bSCX|\bCLP-\d|xpress/i],
+  ['Xerox', /xerox|workcentre|phaser|versalink/i],
+  ['Ricoh', /ricoh|\bSP \d|aficio/i],
+  ['Kyocera', /kyocera|ecosys|taskalfa/i],
+  ['Lexmark', /lexmark/i],
+  ['Konica Minolta', /konica|minolta|bizhub/i],
+  ['Pantum', /pantum/i],
+  ['Sharp', /\bsharp\b/i],
+  ['Dell', /\bdell\b/i],
+  ['OKI', /\bOKI\b|oki data/i]
+];
+export function detectManufacturer(name = '', driver = '') {
+  const text = `${name} ${driver}`;
+  return MAKERS.find(([, pattern]) => pattern.test(text))?.[0] ?? 'Other';
+}
+
+// Port naming used by Windows and the vendor port monitors (HP, Brother, Canon, Epson). Vendor USB ports are
+// checked before network ones because several vendors name both kinds with the same prefix letters.
 export function classifyConnection({ name = '', port = '', driver = '' } = {}) {
   const p = String(port).trim();
   if (isVirtualPrinter({ name, port: p, driver })) return { connectionType: 'Virtual / PDF', isWifi: false, isWired: false };
-  if (/^(USB|DOT4|LPT|COM)\d*/i.test(p) || /^HPUSB|usb/i.test(p) || /\busb\b/i.test(name)) return { connectionType: 'Wired USB Cable', isWifi: false, isWired: true };
-  if (/^(WSD|TCP|IP_|NPI|HP[0-9A-F]{6}|BRN|BRW|CNB|EP[0-9A-F]{6})/i.test(p) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(p) || /^https?:/i.test(p) || /wifi|wireless|network/i.test(name)) {
+  if (/^(USB|DOT4|LPT|COM|BRUSB|EPUSB|CNUSB|CNBJNP[_-]?USB|MFPUSB|HPUSB)\d*/i.test(p) || /^HPUSB|usb/i.test(p) || /\busb\b/i.test(name)) return { connectionType: 'Wired USB Cable', isWifi: false, isWired: true };
+  if (/^(WSD|TCP|IP_|NPI|HP[0-9A-F]{6}|BRN|BRW|CNB|EP[0-9A-F]{6}|EPSON|LPR|RAW|IPP)/i.test(p) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(p) || /^https?:/i.test(p) || /wifi|wireless|network/i.test(name)) {
     return { connectionType: 'WiFi / Wireless Network', isWifi: true, isWired: false };
   }
   return { connectionType: 'Local Spooler', isWifi: false, isWired: false };

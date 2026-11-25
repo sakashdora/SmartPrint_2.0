@@ -7,7 +7,7 @@ import { price, validateOptions } from './print-options.js';
 import { generateTestPage } from './diagnostic-page.js';
 import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
-import { classifyConnection, guessCapabilities } from './printer-capabilities.js';
+import { classifyConnection, guessCapabilities, detectManufacturer } from './printer-capabilities.js';
 import { createNotification } from './notifications.js';
 import { printerSupports, evaluateDevice, classifyPrinterHealth } from './printer-health.js';
 
@@ -329,6 +329,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       const health = evaluateDevice(row);
       return {
         ...d,
+        manufacturer: detectManufacturer(d.name),
         is_paused: Number(paused) ? 1 : 0,
         health,
         // Never "Ready" just because the connector is alive: the note says what is actually known.

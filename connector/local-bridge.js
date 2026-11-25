@@ -24,8 +24,10 @@ async function readJson(req, limit = 16384) {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw Object.assign(new Error('Invalid JSON.'), { status: 400 }); }
 }
 
-// `connector` supplies: state() -> { base, linked, needsRelink, printer }, printers() -> list,
-// pair({ url, token, printer }) -> { printer }. `extraOrigins` adds trusted origins.
+// `connector` supplies: state() -> { base, linked, needsRelink, printer, linkedPrinters }, printers() -> list,
+// pair({ url, token, printer, replace }) -> { printer } (adds one printer; others stay linked), and optionally
+// unpair({ printer }), drivers() -> names, probe({ ip }), addNetworkPrinter({ ip, name, driver }).
+// `extraOrigins` adds trusted origins.
 export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
   return async (req, res) => {
     const origin = req.headers.origin || '';
@@ -65,6 +67,10 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
           server: originOf(s.base),
           linkedHere: s.linked && originOf(s.base) === origin,
           printer: s.printer || '',
+          // Every printer this PC prints for, and whether each one's device key is currently accepted.
+          linkedPrinters: s.linkedPrinters ?? (s.printer ? [{ name: s.printer, authFailed: Boolean(s.needsRelink) }] : []),
+          // Drivers already installed in Windows (for adding a network printer); only when asked for.
+          ...(url.searchParams.get('drivers') === '1' && connector.drivers ? { drivers: await connector.drivers() } : {}),
           // ?printers=0 is the cheap "is the connector running" check the Printers page polls.
           printers: url.searchParams.get('printers') === '0' ? [] : await connector.printers({ fresh: url.searchParams.has('fresh') })
         });
@@ -82,9 +88,24 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
         const result = await connector.pair({ url: origin, token, printer });
         return send(200, { ok: true, printer: result.printer });
       }
+      if (req.method === 'POST' && path === '/unpair' && connector.unpair) {
+        const body = await readJson(req);
+        const name = String(body.printer || '').trim().slice(0, 200);
+        if (!name) return send(400, { error: 'Choose a printer.' });
+        return send(200, { ok: true, ...(await connector.unpair({ printer: name })) });
+      }
+      if (req.method === 'POST' && path === '/probe' && connector.probe) {
+        const body = await readJson(req);
+        return send(200, await connector.probe({ ip: body.ip }));
+      }
+      if (req.method === 'POST' && path === '/network-printer' && connector.addNetworkPrinter) {
+        const body = await readJson(req);
+        const added = await connector.addNetworkPrinter({ ip: body.ip, name: body.name, driver: body.driver });
+        return send(200, { ok: true, printer: added.name, portName: added.portName });
+      }
       return send(404, { error: 'Not found.' });
     } catch (error) {
-      return send(error.status || 500, { error: error.message || 'Connector error.' });
+      return send(error.status || 500, { error: error.message || 'Connector error.', ...(error.needsAdmin ? { needsAdmin: true, command: error.command } : {}) });
     }
   };
 }
