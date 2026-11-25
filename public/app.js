@@ -62,7 +62,6 @@ function header() {
           ${icon('user')}
           <span>${me ? (me.role === 'customer' ? 'My institution' : 'Open workspace') : 'Sign in'}</span>
         </a>
-        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch between light and dark appearance" title="Light / dark"><span aria-hidden="true">◐</span></button>
         <button id="home-mobile-toggle" class="home-mobile-menu-btn" aria-label="Toggle navigation">
           ${icon('menu')}
         </button>
@@ -97,12 +96,6 @@ function mount(content, { workspacePage = false } = {}) {
     });
   }
 
-  document.querySelector('#theme-toggle')?.addEventListener('click', () => {
-    const dark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.documentElement.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
-    const next = dark ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', next);
-    try { localStorage.setItem('sp-theme', next); } catch {}
-  });
   document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => {
     await api('/api/auth/logout', { method: 'POST' });
     me = null;
