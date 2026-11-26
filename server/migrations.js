@@ -173,6 +173,25 @@ export const migrations = [
     description: 'Printers remember what the driver reported (colour, two-sided, when) apart from what the owner set',
     async up(tx) { await tx.query('SELECT det_color, det_duplex, det_at FROM devices LIMIT 1'); }
   }
+  ,
+  {
+    id: '0021_printer_connect_metadata',
+    description: 'Printers store port, driver, connection type, default flag, paper sizes, resolution, connector identity, and orders support target_device_id',
+    async up(tx) {
+      await tx.query('SELECT port_name, driver_name, connection_type, is_default, paper_sizes, resolution_dpi, machine_name, connector_id, connector_version, queue_jobs FROM devices LIMIT 1');
+      await tx.query('SELECT target_device_id FROM orders LIMIT 1');
+      await tx.query('CREATE UNIQUE INDEX IF NOT EXISTS devices_shop_active_name ON devices(shop_id, LOWER(name)) WHERE active=1');
+    }
+  }
+  ,
+  {
+    id: '0022_shop_connectors',
+    description: 'Shop-scoped Windows connector registrations and short-lived pairing tokens',
+    async up(tx) {
+      await tx.query('SELECT 1 FROM connectors LIMIT 1');
+      await tx.query('SELECT 1 FROM connector_pairings LIMIT 1');
+    }
+  }
 ];
 
 const now = () => new Date().toISOString();

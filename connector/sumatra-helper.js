@@ -196,6 +196,17 @@ export function resolveActivePrinter(targetName, printerList = []) {
   return { name: exact.Name, status: 'Offline', switched: false, port: exact.PortName };
 }
 
+export async function setDefaultWindowsPrinter(printerName) {
+  if (process.platform !== 'win32') return false;
+  const target = String(printerName || '').trim();
+  if (!target) throw new Error('Printer name is required.');
+  await run('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    '$ErrorActionPreference = "Stop"; $p = Get-CimInstance -ClassName Win32_Printer | Where-Object { $_.Name -eq $env:SMARTPRINT_TARGET } | Select-Object -First 1; if (-not $p) { throw "Printer not found in Windows." }; $r = Invoke-CimMethod -InputObject $p -MethodName SetDefaultPrinter; if ($r.ReturnValue -ne 0) { throw "Windows refused default printer change ($($r.ReturnValue))." }'
+  ], { timeout: 15000, windowsHide: true, env: { ...process.env, SMARTPRINT_TARGET: target } });
+  return true;
+}
+
 export async function getWindowsPrinters() {
   if (process.platform !== 'win32') return [];
   // Get-Printer has no Default property, so the Windows default printer comes from Win32_Printer.
@@ -209,8 +220,9 @@ export async function getWindowsPrinters() {
     "$ErrorActionPreference = 'SilentlyContinue'",
     '$def = (Get-CimInstance -ClassName Win32_Printer -Filter "Default=TRUE" | Select-Object -First 1).Name',
     '$offline = @{}; foreach ($c in @(Get-CimInstance -ClassName Win32_Printer)) { $offline[$c.Name] = [bool]$c.WorkOffline }',
+    '$ports = @{}; foreach ($pt in @(Get-PrinterPort)) { $ports[$pt.Name] = [pscustomobject]@{ Monitor = $pt.PortMonitor; Host = $pt.PrinterHostAddress } }',
     '$nodes = $null; try { $nodes = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -like "USBPRINT*" } | ForEach-Object { $_.InstanceId }) } catch { $nodes = $null }',
-    '$list = @(foreach ($p in @(Get-Printer)) { $usb = $null; if (($null -ne $nodes) -and ($p.PortName -match "^USB[0-9]+$")) { $usb = [bool](@($nodes | Where-Object { $_ -like ("*&" + $p.PortName) }).Count) }; [pscustomobject]@{ Name = $p.Name; PrinterStatus = $p.PrinterStatus; PortName = $p.PortName; DriverName = $p.DriverName; Default = ($p.Name -eq $def); WorkOffline = [bool]$offline[$p.Name]; UsbPresent = $usb } })',
+    '$list = @(foreach ($p in @(Get-Printer)) { $usb = $null; if (($null -ne $nodes) -and ($p.PortName -match "^USB[0-9]+$")) { $usb = [bool](@($nodes | Where-Object { $_ -like ("*&" + $p.PortName) }).Count) }; $ptInfo = $ports[$p.PortName]; [pscustomobject]@{ Name = $p.Name; PrinterStatus = $p.PrinterStatus; PortName = $p.PortName; PortMonitor = $ptInfo.Monitor; PrinterHostAddress = $ptInfo.Host; DriverName = $p.DriverName; Default = ($p.Name -eq $def); Shared = [bool]$p.Shared; ShareName = $p.ShareName; Location = $p.Location; JobCount = [int]$p.JobCount; Type = [string]$p.Type; WorkOffline = [bool]$offline[$p.Name]; UsbPresent = $usb } })',
     'ConvertTo-Json -Compress -InputObject $list'
   ].join('; ');
   try {

@@ -25,7 +25,7 @@ dns.lookup = (hostname, options, callback) => {
   });
 };
 import { schema } from './schema.js';
-const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events|institution_settings|campuses|departments|edu_profiles|queue_classes|wallet_accounts|wallet_balances|ledger_entries|wallet_holds|offline_reservations|offline_sync_log|reconciliation_cases|offline_staff_pins|pool_departments|alerts|webhook_endpoints|webhook_deliveries|payment_settings|payment_intents|gateway_events|refunds_v2';
+const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|connectors|connector_pairings|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events|institution_settings|campuses|departments|edu_profiles|queue_classes|wallet_accounts|wallet_balances|ledger_entries|wallet_holds|offline_reservations|offline_sync_log|reconciliation_cases|offline_staff_pins|pool_departments|alerts|webhook_endpoints|webhook_deliveries|payment_settings|payment_intents|gateway_events|refunds_v2';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
 
 export async function openDatabase({ url = process.env.DATABASE_URL, path = process.env.SMARTPRINT_SQLITE_PATH || '.data/smartprint.sqlite' } = {}) {
@@ -122,7 +122,18 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
             ['devices', 'health_source', 'TEXT'],
             ['devices', 'det_color', 'INTEGER'],
             ['devices', 'det_duplex', 'INTEGER'],
-            ['devices', 'det_at', 'TEXT']
+            ['devices', 'det_at', 'TEXT'],
+            ['devices', 'port_name', 'TEXT'],
+            ['devices', 'driver_name', 'TEXT'],
+            ['devices', 'connection_type', 'TEXT'],
+            ['devices', 'is_default', 'INTEGER NOT NULL DEFAULT 0'],
+            ['devices', 'paper_sizes', "TEXT DEFAULT '[]'"],
+            ['devices', 'resolution_dpi', 'INTEGER'],
+            ['devices', 'machine_name', 'TEXT'],
+            ['devices', 'connector_id', 'TEXT'],
+            ['devices', 'connector_version', 'TEXT'],
+            ['devices', 'queue_jobs', 'INTEGER DEFAULT 0'],
+            ['orders', 'target_device_id', 'TEXT']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -193,8 +204,13 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN created TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN cap_source TEXT;"); } catch {}
-      for (const column of ['health', 'health_detail', 'health_checked', 'health_source', 'det_at']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} TEXT;`); } catch {} }
-      for (const column of ['det_color', 'det_duplex']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} INTEGER;`); } catch {} }
+      for (const column of ['health', 'health_detail', 'health_checked', 'health_source', 'det_at', 'port_name', 'driver_name', 'connection_type', 'machine_name', 'connector_id', 'connector_version']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} TEXT;`); } catch {} }
+      for (const column of ['det_color', 'det_duplex', 'resolution_dpi']) { try { sqlite.exec(`ALTER TABLE devices ADD COLUMN ${column} INTEGER;`); } catch {} }
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN paper_sizes TEXT DEFAULT '[]';"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN queue_jobs INTEGER DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE orders ADD COLUMN target_device_id TEXT;"); } catch {}
+      try { sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS devices_shop_active_name ON devices(shop_id, LOWER(name)) WHERE active=1;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

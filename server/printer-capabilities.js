@@ -3,9 +3,10 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
-// Asks each Windows printer driver whether it can print colour and duplex (DeviceCapabilities via
-// System.Drawing.Printing.PrinterSettings). Names travel through an environment variable, never the
-// command text. Printers the driver cannot describe are left out: callers must treat them as unknown.
+// Asks each Windows printer driver whether it can print colour, duplex, paper sizes, and resolution
+// (System.Drawing.Printing.PrinterSettings + System.Printing.LocalPrintServer). Names travel through
+// an environment variable, never the command text. Printers the driver cannot describe are left out:
+// callers must treat them as unknown.
 // Colour comes from the driver's PrintCapabilities (System.Printing) where available: the older
 // DeviceCapabilities answer claims colour for mono drivers such as the HP LaserJet 1020.
 const script = [
@@ -14,12 +15,37 @@ const script = [
   '$names = $env:SMARTPRINT_PRINTER_NAMES | ConvertFrom-Json',
   '$out = @(foreach ($n in $names) { $s = New-Object System.Drawing.Printing.PrinterSettings; $s.PrinterName = [string]$n;',
   'if ($s.IsValid) { $color = [bool]$s.SupportsColor; $duplex = [bool]$s.CanDuplex;',
-  'if ($srv) { try { $c = $srv.GetPrintQueue([string]$n).GetPrintCapabilities(); $color = @($c.OutputColorCapability | Where-Object { "$_" -eq "Color" }).Count -gt 0;',
-  '$duplex = $duplex -and (@($c.DuplexingCapability | Where-Object { "$_" -like "TwoSided*" }).Count -gt 0) } catch {} }',
+  '$papers = @($s.PaperSizes | ForEach-Object { $_.PaperName } | Where-Object { $_ } | Select-Object -Unique -First 12);',
+  '$dpi = @($s.PrinterResolutions | ForEach-Object { [Math]::Max($_.X, $_.Y) } | Where-Object { $_ -gt 0 } | Measure-Object -Maximum).Maximum;',
+  'if ($srv) { try { $c = $srv.GetPrintQueue([string]$n).GetPrintCapabilities();',
+  '$color = @($c.OutputColorCapability | Where-Object { "$_" -eq "Color" }).Count -gt 0;',
+  '$duplex = $duplex -and (@($c.DuplexingCapability | Where-Object { "$_" -like "TwoSided*" }).Count -gt 0);',
+  '$capPapers = @($c.PageMediaSizeCapability | ForEach-Object { "$($_.PageMediaSizeName)" } | Where-Object { $_ -and $_ -ne "Unknown" } | Select-Object -Unique -First 12);',
+  'if ($capPapers.Count -gt 0) { $papers = $capPapers };',
+  '$capDpi = @($c.PageResolutionCapability | ForEach-Object { [Math]::Max($_.X, $_.Y) } | Where-Object { $_ -gt 0 } | Measure-Object -Maximum).Maximum;',
+  'if ($capDpi -gt 0) { $dpi = $capDpi } } catch {} }',
   '$driver = [string](Get-Printer -Name ([string]$n) -ErrorAction SilentlyContinue).DriverName;',
-  '[pscustomobject]@{ name = [string]$n; driver = $driver; color = $color; duplex = $duplex } } })',
+  '[pscustomobject]@{ name = [string]$n; driver = $driver; color = $color; duplex = $duplex; paperSizes = $papers; resolutionDpi = if ($dpi -gt 0) { [int]$dpi } else { $null } } } })',
   'ConvertTo-Json -Compress -InputObject $out'
 ].join('\n');
+
+const PAPER_LABELS = {
+  ISOA4: 'A4', ISOA3: 'A3', ISOA5: 'A5', ISOA6: 'A6',
+  JISB4: 'B4', JISB5: 'B5',
+  NorthAmericaLetter: 'Letter', NorthAmericaLegal: 'Legal', NorthAmericaExecutive: 'Executive',
+  NorthAmericaStatement: 'Statement', NorthAmerica11x17: '11x17',
+  NorthAmericaNumber10Envelope: 'Env #10', ISODLEnvelope: 'Env DL'
+};
+export function normalizePaperSizes(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  for (const item of raw) {
+    const clean = PAPER_LABELS[String(item || '').trim()] || String(item || '').trim();
+    if (clean && !seen.has(clean)) seen.add(clean);
+    if (seen.size >= 12) break;
+  }
+  return [...seen];
+}
 
 // Software printers that accept a job but never put paper out. Picking one of these as the fallback
 // printer makes jobs "print" successfully while nothing comes out.
@@ -54,14 +80,28 @@ export function detectManufacturer(name = '', driver = '') {
 
 // Port naming used by Windows and the vendor port monitors (HP, Brother, Canon, Epson). Vendor USB ports are
 // checked before network ones because several vendors name both kinds with the same prefix letters.
-export function classifyConnection({ name = '', port = '', driver = '' } = {}) {
+export function classifyConnection({ name = '', port = '', driver = '', shared = false } = {}) {
   const p = String(port).trim();
-  if (isVirtualPrinter({ name, port: p, driver })) return { connectionType: 'Virtual / PDF', isWifi: false, isWired: false };
-  if (/^(USB|DOT4|LPT|COM|BRUSB|EPUSB|CNUSB|CNBJNP[_-]?USB|MFPUSB|HPUSB)\d*/i.test(p) || /^HPUSB|usb/i.test(p) || /\busb\b/i.test(name)) return { connectionType: 'Wired USB Cable', isWifi: false, isWired: true };
-  if (/^(WSD|TCP|IP_|NPI|HP[0-9A-F]{6}|BRN|BRW|CNB|EP[0-9A-F]{6}|EPSON|LPR|RAW|IPP)/i.test(p) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(p) || /^https?:/i.test(p) || /wifi|wireless|network/i.test(name)) {
-    return { connectionType: 'WiFi / Wireless Network', isWifi: true, isWired: false };
+  const n = String(name).trim();
+  if (isVirtualPrinter({ name: n, port: p, driver })) return { kind: 'virtual', connectionType: 'Virtual / PDF', isWifi: false, isWired: false };
+  if (/^\\\\/.test(n) || /^\\\\/.test(p) || /point and print/i.test(driver)) {
+    return { kind: 'shared', connectionType: 'Shared Network Printer', isWifi: true, isWired: false };
   }
-  return { connectionType: 'Local Spooler', isWifi: false, isWired: false };
+  if (/^(USB|DOT4|LPT|COM|BRUSB|EPUSB|CNUSB|CNBJNP[_-]?USB|MFPUSB|HPUSB)\d*/i.test(p) || /^HPUSB|usb/i.test(p) || /\busb\b/i.test(n)) {
+    return { kind: 'usb', connectionType: 'Wired USB Cable', isWifi: false, isWired: true };
+  }
+  if (/^(IP_|TCP|LPR|RAW)/i.test(p) || /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(p)) {
+    const isLan = /\b(ethernet|lan)\b/i.test(n);
+    return { kind: isLan ? 'ethernet' : 'tcpip', connectionType: isLan ? 'Ethernet / LAN' : 'TCP/IP Network', isWifi: true, isWired: false };
+  }
+  if (/^(WSD|IPP|BRW|CNB)/i.test(p) || /^https?:/i.test(p) || /wifi|wireless/i.test(n)) {
+    return { kind: 'wifi', connectionType: 'WiFi / Wireless Network', isWifi: true, isWired: false };
+  }
+  if (/^(NPI|HP[0-9A-F]{6}|BRN|EP[0-9A-F]{6}|EPSON)/i.test(p) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(p) || /network/i.test(n)) {
+    return { kind: 'ethernet', connectionType: 'Ethernet / Network', isWifi: true, isWired: false };
+  }
+  if (shared) return { kind: 'shared', connectionType: 'Shared Network Printer', isWifi: true, isWired: false };
+  return { kind: 'local', connectionType: 'Local Spooler', isWifi: false, isWired: false };
 }
 
 // Display-only guess from the model name, used until the driver is probed. It errs on "no": a mono
@@ -90,7 +130,12 @@ export async function probePrinterCapabilities(names) {
         // Drivers of simplex lasers (HP LaserJet 1020, P1108, M1005 ...) advertise *manual* duplex, which
         // needs someone to turn the paper over. Only an automatic-duplex model counts as two-sided.
         const automaticDuplex = guessCapabilities(item.name).duplex || guessCapabilities(String(item.driver || '')).duplex;
-        result.set(item.name, { color: item.color, duplex: item.duplex && automaticDuplex });
+        result.set(item.name, {
+          color: item.color,
+          duplex: item.duplex && automaticDuplex,
+          paperSizes: normalizePaperSizes(item.paperSizes),
+          resolutionDpi: Number.isFinite(Number(item.resolutionDpi)) && Number(item.resolutionDpi) > 0 ? Number(item.resolutionDpi) : null
+        });
       }
     }
   } catch {}

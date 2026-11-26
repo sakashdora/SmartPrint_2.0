@@ -10,8 +10,8 @@ import { createHash } from 'node:crypto';
 //     print({ pdfPath, printerName, options }) -> { method }     sends the file to the Windows queue
 //     getHealth() -> { blocking, label, at } | null              what Windows last said about this printer
 //     refreshToken() -> string | null                            the current key for this printer from settings.json
-export function createWorker({ name, token, getBase, root, print, getHealth = () => null, refreshToken = () => null, log = () => {}, fetchImpl = fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
-  const worker = { name, token, authFailed: false, running: false, lastJobAt: 0 };
+export function createWorker({ name, token, getBase, root, print, getHealth = () => null, refreshToken = () => null, onHeartbeat = () => {}, log = () => {}, fetchImpl = fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  const worker = { name, token, authFailed: false, running: false, lastJobAt: 0, lastHeartbeatAt: 0 };
 
   async function request(path, { method = 'GET', body, lease, binary, range } = {}) {
     const response = await fetchImpl(new URL(path, getBase()), {
@@ -128,7 +128,12 @@ export function createWorker({ name, token, getBase, root, print, getHealth = ()
   let beat = null;
   Object.assign(worker, {
     request, printJob, claimOnce,
-    heartbeat: () => request('/api/device/heartbeat', { method: 'POST' }),
+    heartbeat: async () => {
+      const res = await request('/api/device/heartbeat', { method: 'POST' });
+      worker.lastHeartbeatAt = Date.now();
+      onHeartbeat(res);
+      return res;
+    },
     start() {
       if (worker.running) return worker.done;
       worker.running = true;

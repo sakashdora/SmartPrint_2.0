@@ -22,14 +22,22 @@ export function normalizeConfig(cfg = {}) {
 
 const withLegacyFields = cfg => ({ ...cfg, Token: cfg.Printers[0]?.Token ?? '', Printer: cfg.Printers[0]?.Name ?? '' });
 
-// Adds or re-links one printer. Linking to a different SmartPrint server replaces every other printer, because the
-// existing ones belong to the old server.
-export function upsertPrinter(cfg, { url, name, token }) {
+// Adds or re-links one printer. Linking to a different SmartPrint server or shop replaces every other printer,
+// because the existing ones belong to the old server/shop.
+export function upsertPrinter(cfg, { url, name, token, shopId = null, shopName = null }) {
   const current = normalizeConfig(cfg), target = stripSlash(url);
   if (!name || !token) throw new Error('A printer name and device key are required.');
   const sameServer = !current.Url || stripSlash(current.Url) === target;
-  const kept = sameServer ? current.Printers.filter(p => p.Name && !sameName(p.Name, name)) : [];
-  return withLegacyFields({ ...current, Url: target, Printers: [...kept, { Name: String(name).trim(), Token: token }], LastUpdated: new Date().toISOString() });
+  const sameShop = !current.ShopId || !shopId || current.ShopId === shopId;
+  const kept = (sameServer && sameShop) ? current.Printers.filter(p => p.Name && !sameName(p.Name, name)) : [];
+  return withLegacyFields({
+    ...current,
+    Url: target,
+    ShopId: shopId || (sameServer ? current.ShopId : null) || null,
+    ShopName: shopName || (sameServer && sameShop ? current.ShopName : null) || null,
+    Printers: [...kept, { Name: String(name).trim(), Token: token }],
+    LastUpdated: new Date().toISOString()
+  });
 }
 
 export function removePrinter(cfg, name) {

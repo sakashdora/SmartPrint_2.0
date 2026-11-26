@@ -62,6 +62,15 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
         return send(200, {
           app: 'smartprint-connector',
           version: 3,
+          connectorId: s.connectorId || null,
+          connectorVersion: s.connectorVersion || '3.1.0',
+          machineId: s.machineId || null,
+          machineName: s.machineName || null,
+          shopId: s.shopId || null,
+          shopName: s.shopName || null,
+          lastHeartbeatAt: s.lastHeartbeatAt || null,
+          lastScanAt: s.lastScanAt || null,
+          lastScanError: s.lastScanError || null,
           linked: s.linked,
           needsRelink: s.needsRelink,
           server: originOf(s.base),
@@ -72,21 +81,29 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
           // Drivers already installed in Windows (for adding a network printer); only when asked for.
           ...(url.searchParams.get('drivers') === '1' && connector.drivers ? { drivers: await connector.drivers() } : {}),
           // ?printers=0 is the cheap "is the connector running" check the Printers page polls.
-          printers: url.searchParams.get('printers') === '0' ? [] : await connector.printers({ fresh: url.searchParams.has('fresh') })
+          printers: url.searchParams.get('printers') === '0' ? [] : await connector.printers({ fresh: url.searchParams.has('fresh'), includeVirtual: url.searchParams.get('virtual') === '1' })
         });
       }
       if (req.method === 'POST' && path === '/pair') {
         const body = await readJson(req);
         const target = String(body.url || ''), token = String(body.token || ''), printer = String(body.printer || '').trim().slice(0, 200);
+        const shopId = body.shopId ? String(body.shopId).trim().slice(0, 100) : null;
+        const shopName = body.shopName ? String(body.shopName).trim().slice(0, 150) : null;
         // A page can only link the connector to its own server.
         if (originOf(target) !== origin) return send(400, { error: 'The server address must match this page.' });
         if (!/^[A-Za-z0-9_-]{16,200}$/.test(token)) return send(400, { error: 'Invalid device key.' });
         const s = connector.state();
-        if (s.linked && originOf(s.base) !== origin && body.replace !== true) {
-          return send(409, { error: 'linked-elsewhere', server: originOf(s.base) });
+        const differentServer = s.linked && originOf(s.base) !== origin;
+        const differentShop = s.linked && s.shopId && shopId && s.shopId !== shopId;
+        if ((differentServer || differentShop) && body.replace !== true) {
+          return send(409, { error: 'linked-elsewhere', server: originOf(s.base), shopId: s.shopId || null, shopName: s.shopName || null });
         }
-        const result = await connector.pair({ url: origin, token, printer });
-        return send(200, { ok: true, printer: result.printer });
+        const result = await connector.pair({ url: origin, token, printer, ...(shopId ? { shopId } : {}), ...(shopName ? { shopName } : {}) });
+        return send(200, { ok: true, printer: result.printer, shopId: result.shopId || shopId, shopName: result.shopName || shopName });
+      }
+      if (req.method === 'POST' && path === '/release' && connector.release) {
+        const result = await connector.release();
+        return send(200, { ok: true, ...result });
       }
       if (req.method === 'POST' && path === '/unpair' && connector.unpair) {
         const body = await readJson(req);
@@ -102,6 +119,17 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
         const body = await readJson(req);
         const added = await connector.addNetworkPrinter({ ip: body.ip, name: body.name, driver: body.driver });
         return send(200, { ok: true, printer: added.name, portName: added.portName });
+      }
+      if (req.method === 'POST' && path === '/set-default' && connector.setDefault) {
+        const body = await readJson(req);
+        const name = String(body.printer || '').trim().slice(0, 200);
+        if (!name) return send(400, { error: 'Choose a printer.' });
+        await connector.setDefault({ printer: name });
+        return send(200, { ok: true, printer: name });
+      }
+      if (req.method === 'POST' && path === '/refresh' && connector.refresh) {
+        const result = await connector.refresh();
+        return send(200, { ok: true, ...result });
       }
       return send(404, { error: 'Not found.' });
     } catch (error) {

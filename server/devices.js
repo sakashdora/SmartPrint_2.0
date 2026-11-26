@@ -50,13 +50,14 @@ export function cleanPrinterList(list) {
   for (const p of Array.isArray(list) ? list : []) {
     if (!p || typeof p.name !== 'string' || !p.name.trim()) continue;
     const item = {};
-    for (const [k, v] of Object.entries(p).slice(0, 20)) {
+    for (const [k, v] of Object.entries(p).slice(0, 25)) {
       if (typeof v === 'string') item[k] = v.slice(0, 200);
       else if (typeof v === 'number' || typeof v === 'boolean') item[k] = v;
+      else if (k === 'paperSizes' && Array.isArray(v)) item.paperSizes = v.slice(0, 12).map(s => String(s).slice(0, 40)).filter(Boolean);
     }
     item.name = p.name.trim().slice(0, 200);
     // The printers page renders these flags unescaped inside attributes, so they must be real booleans.
-    for (const flag of ['isWifi', 'isWired', 'isDefault', 'color', 'duplex']) if (flag in item) item[flag] = item[flag] === true;
+    for (const flag of ['isWifi', 'isWired', 'isDefault', 'color', 'duplex', 'shared', 'verified']) if (flag in item) item[flag] = item[flag] === true;
     result.push(item);
     if (result.length >= MAX_SCANNED_PRINTERS) break;
   }
@@ -277,6 +278,88 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   // Links a printer of the shop PC. The Printers page, opened on that PC, gets a fresh device key here
   // and hands it straight to the connector through its local link, so the owner never copies a key.
   // A fresh key is issued every time: whichever connector received it is the one printing.
+  app.get('/api/owner/connectors', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const rows = await db.query(
+      'SELECT id, shop_id, machine_id, machine_name, version, status, last_heartbeat, last_scan, created, revoked_at FROM connectors WHERE shop_id=$1 ORDER BY status ASC, last_heartbeat DESC NULLS LAST, created DESC',
+      [shop.id]
+    ).catch(() => db.query('SELECT id, shop_id, machine_id, machine_name, version, status, last_heartbeat, last_scan, created, revoked_at FROM connectors WHERE shop_id=$1 ORDER BY status ASC, created DESC', [shop.id]));
+    const nowMs = Date.now();
+    res.json({
+      shop: { id: shop.id, name: shop.name, slug: shop.slug },
+      connectors: rows.map(c => {
+        const beat = c.last_heartbeat ? Date.parse(c.last_heartbeat) : NaN;
+        const online = c.status === 'active' && Number.isFinite(beat) && nowMs - beat <= 180000;
+        return { ...c, online };
+      })
+    });
+  });
+
+  app.post('/api/owner/connectors/pairing-token', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const raw = token();
+    const id = randomUUID();
+    const expires = new Date(Date.now() + 10 * 60000).toISOString();
+    await db.query(
+      'INSERT INTO connector_pairings (id, shop_id, token_hash, expires, created) VALUES ($1,$2,$3,$4,$5)',
+      [id, shop.id, digest(raw), expires, now()]
+    );
+    res.json({ ok: true, pairingToken: raw, shopId: shop.id, shopName: shop.name, expires });
+  });
+
+  app.post('/api/owner/connectors/pair', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const connectorId = String(req.body.connectorId || '').trim().slice(0, 100);
+    if (!connectorId) throw fail(400, 'Connector identity is required.');
+    const machineId = req.body.machineId ? String(req.body.machineId).trim().slice(0, 120) : null;
+    const machineName = req.body.machineName ? String(req.body.machineName).trim().slice(0, 100) : null;
+    const version = req.body.version ? String(req.body.version).trim().slice(0, 40) : null;
+    const pairingToken = req.body.pairingToken ? String(req.body.pairingToken).trim() : null;
+
+    await db.transaction(async tx => {
+      if (pairingToken) {
+        const [p] = await tx.query('SELECT * FROM connector_pairings WHERE token_hash=$1 AND shop_id=$2 AND used_at IS NULL AND expires>$3', [digest(pairingToken), shop.id, now()]);
+        if (!p) throw fail(400, 'Pairing token is invalid or expired.');
+        await tx.query('UPDATE connector_pairings SET used_at=$1 WHERE id=$2', [now(), p.id]);
+      }
+      const [existing] = await tx.query('SELECT c.*, s.name AS shop_name FROM connectors c LEFT JOIN shops s ON s.id=c.shop_id WHERE c.id=$1', [connectorId]);
+      if (existing && existing.shop_id !== shop.id && existing.status === 'active') {
+        throw Object.assign(new Error(`This connector is already registered to "${existing.shop_name || 'another shop'}". Release or transfer it before pairing with "${shop.name}".`), {
+          status: 409,
+          code: 'ownership_conflict',
+          ownerShopName: existing.shop_name || 'Another shop'
+        });
+      }
+      if (!existing) {
+        await tx.query(
+          'INSERT INTO connectors (id, shop_id, machine_id, machine_name, version, status, created) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [connectorId, shop.id, machineId, machineName, version, 'active', now()]
+        );
+      } else {
+        await tx.query(
+          'UPDATE connectors SET shop_id=$1, machine_id=COALESCE($2,machine_id), machine_name=COALESCE($3,machine_name), version=COALESCE($4,version), status=$5, revoked_at=NULL WHERE id=$6',
+          [shop.id, machineId, machineName, version, 'active', connectorId]
+        );
+      }
+      await audit(tx, req.user.id, 'connector.paired', connectorId);
+    });
+    res.json({ ok: true, connectorId, shopId: shop.id, shopName: shop.name });
+  });
+
+  app.post('/api/owner/connectors/release', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const connectorId = String(req.body.connectorId || '').trim().slice(0, 100);
+    if (!connectorId) throw fail(400, 'Connector identity is required.');
+    await db.transaction(async tx => {
+      const [existing] = await tx.query('SELECT * FROM connectors WHERE id=$1 AND shop_id=$2', [connectorId, shop.id]);
+      if (!existing) throw fail(404, 'Connector not found for this shop.');
+      await tx.query("UPDATE connectors SET status='revoked', revoked_at=$1 WHERE id=$2 AND shop_id=$3", [now(), connectorId, shop.id]);
+      await tx.query('UPDATE devices SET active=0 WHERE shop_id=$1 AND connector_id=$2', [shop.id, connectorId]);
+      await audit(tx, req.user.id, 'connector.released', connectorId);
+    });
+    res.json({ ok: true, connectorId });
+  });
+
   app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
     const shop = await ownerShop(req);
     const printerName = String(req.body.name || '').trim().slice(0, 100);
@@ -286,27 +369,47 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       'SELECT id, name, active, color, duplex, cap_source FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
       [shop.id, printerName]
     );
-    // Capabilities come from the connector's driver probe on the shop PC (sent by the page) or stay
-    // unknown, which means no colour and no duplex, so such jobs are never routed to this printer.
-    // The connector reports the driver values again once it checks in.
-    // `manual: true` means the owner chose these on screen (they stay put; later scans never overwrite them).
     const capability = flag => typeof req.body[flag] === 'boolean' ? (req.body[flag] ? 1 : 0) : undefined;
     const manual = req.body.manual === true && capability('color') !== undefined && capability('duplex') !== undefined;
+    const portName = req.body.portName ? String(req.body.portName).trim().slice(0, 120) : null;
+    const driverName = req.body.driverName ? String(req.body.driverName).trim().slice(0, 150) : null;
+    const connectionType = req.body.connectionType ? String(req.body.connectionType).trim().slice(0, 60) : null;
+    const isDefault = req.body.isDefault === true ? 1 : 0;
+    const paperSizes = Array.isArray(req.body.paperSizes) ? JSON.stringify(req.body.paperSizes.slice(0, 12).map(s => String(s).slice(0, 40))) : null;
+    const resolutionDpi = Number.isInteger(Number(req.body.resolutionDpi)) && Number(req.body.resolutionDpi) > 0 ? Number(req.body.resolutionDpi) : null;
+    const machineName = req.body.machineName ? String(req.body.machineName).trim().slice(0, 100) : null;
+    const connectorId = req.body.connectorId ? String(req.body.connectorId).trim().slice(0, 100) : null;
+    const connectorVersion = req.body.connectorVersion ? String(req.body.connectorVersion).trim().slice(0, 40) : null;
     const secret = token();
     if (!device) {
       const id = randomUUID();
       // No heartbeat: the printer shows online only once its connector checks in with this key.
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,cap_source) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
-        id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0, manual ? 'manual' : 'driver'
-      ]);
+      await db.query(
+        'INSERT INTO devices (id,shop_id,name,token,color,duplex,active,cap_source,port_name,driver_name,connection_type,is_default,paper_sizes,resolution_dpi,machine_name,connector_id,connector_version) VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)',
+        [
+          id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0,
+          manual ? 'manual' : 'driver', portName, driverName, connectionType, isDefault,
+          paperSizes || '[]', resolutionDpi, machineName, connectorId, connectorVersion
+        ]
+      );
       device = { id, name: printerName, active: 1, color: capability('color') ?? 0, duplex: capability('duplex') ?? 0 };
     } else {
-      const keep = device.cap_source === 'manual' && !manual; // the owner's earlier choice wins over a detected value
+      const keep = device.cap_source === 'manual' && !manual;
       const color = keep ? device.color : capability('color') ?? device.color, duplex = keep ? device.duplex : capability('duplex') ?? device.duplex;
-      // The current key keeps working until a connector actually checks in with the new one. A Connect
-      // whose key never reaches the connector (blocked, closed, asleep) therefore cannot lock it out.
-      await db.query('UPDATE devices SET name=$1, color=$2, duplex=$3, cap_source=$4 WHERE id=$5', [printerName, color, duplex, manual || keep ? 'manual' : 'driver', device.id]);
-      pendingKeys.set(digest(secret), { deviceId: device.id, expires: Date.now() + PENDING_KEY_MS });
+      // If previously disconnected (active=0), reactivate immediately and set the new token;
+      // if already active, keep the current key working via pendingKeys until the connector checks in.
+      if (Number(device.active) === 0) {
+        await db.query(
+          'UPDATE devices SET name=$1, token=$2, active=1, color=$3, duplex=$4, cap_source=$5, port_name=COALESCE($6,port_name), driver_name=COALESCE($7,driver_name), connection_type=COALESCE($8,connection_type), is_default=$9, paper_sizes=COALESCE($10,paper_sizes), resolution_dpi=COALESCE($11,resolution_dpi), machine_name=COALESCE($12,machine_name), connector_id=COALESCE($13,connector_id), connector_version=COALESCE($14,connector_version) WHERE id=$15',
+          [printerName, digest(secret), color, duplex, manual || keep ? 'manual' : 'driver', portName, driverName, connectionType, isDefault, paperSizes, resolutionDpi, machineName, connectorId, connectorVersion, device.id]
+        );
+      } else {
+        await db.query(
+          'UPDATE devices SET name=$1, color=$2, duplex=$3, cap_source=$4, port_name=COALESCE($5,port_name), driver_name=COALESCE($6,driver_name), connection_type=COALESCE($7,connection_type), is_default=$8, paper_sizes=COALESCE($9,paper_sizes), resolution_dpi=COALESCE($10,resolution_dpi), machine_name=COALESCE($11,machine_name), connector_id=COALESCE($12,connector_id), connector_version=COALESCE($13,connector_version) WHERE id=$14',
+          [printerName, color, duplex, manual || keep ? 'manual' : 'driver', portName, driverName, connectionType, isDefault, paperSizes, resolutionDpi, machineName, connectorId, connectorVersion, device.id]
+        );
+        pendingKeys.set(digest(secret), { deviceId: device.id, expires: Date.now() + PENDING_KEY_MS });
+      }
       Object.assign(device, { name: printerName, color, duplex });
     }
     await db.query('UPDATE devices SET paused=0, paused_note=NULL WHERE id=$1', [device.id]);
@@ -323,14 +426,17 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,health,health_detail,health_checked,health_source,det_color,det_duplex,det_at FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,health,health_detail,health_checked,health_source,det_color,det_duplex,det_at,port_name,driver_name,connection_type,is_default,paper_sizes,resolution_dpi,machine_name,connector_id,connector_version,queue_jobs FROM devices WHERE shop_id=$1 ORDER BY active DESC, is_default DESC, name ASC', [shop.id]);
     res.json(rows.map(row => {
-      const { paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, det_color: _dc, det_duplex: _dd, det_at: _da, ...d } = row;
+      const { paused, paused_note, health: _h, health_detail: _d, health_checked: _c, health_source: _s, det_color: _dc, det_duplex: _dd, det_at: _da, paper_sizes, ...d } = row;
       const health = evaluateDevice(row);
+      let parsedPapers = [];
+      try { parsedPapers = JSON.parse(paper_sizes || '[]'); } catch {}
       return {
         ...d,
-        manufacturer: detectManufacturer(d.name),
-        abilities: describeAbilities(row),
+        paper_sizes: Array.isArray(parsedPapers) ? parsedPapers : [],
+        manufacturer: detectManufacturer(d.name, d.driver_name || ''),
+        abilities: { ...describeAbilities(row), paper_sizes: Array.isArray(parsedPapers) ? parsedPapers : [], resolution_dpi: row.resolution_dpi || null },
         is_paused: Number(paused) ? 1 : 0,
         health,
         // Never "Ready" just because the connector is alive: the note says what is actually known.
@@ -382,12 +488,57 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.json({ ok: true, is_paused: nextState });
   });
 
+  app.post('/api/owner/devices/:id/default', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT id, name, active FROM devices WHERE id=$1 AND shop_id=$2 AND active=1', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Active printer not found.');
+    await db.transaction(async tx => {
+      await tx.query('UPDATE devices SET is_default=0 WHERE shop_id=$1', [shop.id]);
+      await tx.query('UPDATE devices SET is_default=1 WHERE id=$1 AND shop_id=$2', [device.id, shop.id]);
+      await audit(tx, req.user.id, 'device.set_default', device.id);
+    });
+    res.json({ ok: true, id: device.id, name: device.name });
+  });
+
+  app.get('/api/owner/devices/:id/diagnostics', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,health,health_detail,health_checked,health_source,det_color,det_duplex,det_at,port_name,driver_name,connection_type,is_default,paper_sizes,resolution_dpi,machine_name,connector_id,connector_version,queue_jobs FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Printer not found.');
+    const leases = await db.query(
+      'SELECT l.order_id, l.state, l.detail, l.expires, o.status AS order_status, o.file_name, o.created FROM print_leases l JOIN orders o ON o.id=l.order_id WHERE l.device_id=$1 ORDER BY o.created DESC LIMIT 10',
+      [device.id]
+    );
+    let parsedPapers = [];
+    try { parsedPapers = JSON.parse(device.paper_sizes || '[]'); } catch {}
+    res.json({
+      id: device.id,
+      name: device.name,
+      active: Boolean(device.active),
+      is_default: Boolean(device.is_default),
+      port_name: device.port_name || null,
+      driver_name: device.driver_name || null,
+      connection_type: device.connection_type || null,
+      paper_sizes: Array.isArray(parsedPapers) ? parsedPapers : [],
+      resolution_dpi: device.resolution_dpi || null,
+      machine_name: device.machine_name || null,
+      connector_id: device.connector_id || null,
+      connector_version: device.connector_version || null,
+      queue_jobs: device.queue_jobs ?? 0,
+      heartbeat: device.heartbeat || null,
+      health: evaluateDevice(device),
+      abilities: describeAbilities(device),
+      recent_jobs: leases
+    });
+  });
+
   app.post('/api/owner/devices/:id/test-print', owner, async (req, res) => {
     const shop = await ownerShop(req);
     const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2 AND active=1', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Active device not found.');
-    // A test page for an offline printer would sit in the queue and print by surprise later.
-    if (!device.heartbeat || Date.now() - new Date(device.heartbeat).getTime() > 180000) throw fail(409, `${device.name} is offline: its SmartPrint connector is not running or not linked. Connect it from this page on the shop PC, then try again.`);
+    const evalHealth = evaluateDevice(device);
+    if (!evalHealth.connector_online) throw fail(409, `${device.name} is offline: its SmartPrint connector is not running or not linked. Connect it from this page on the shop PC, then try again.`);
+    if (evalHealth.state === 'paused_by_owner') throw fail(409, `${device.name} is paused. Resume it before sending a test print.`);
+    if (evalHealth.blocking) throw fail(409, `${device.name} cannot accept a test print right now (${evalHealth.label}). Fix the printer issue and refresh status first.`);
     const abilities = describeAbilities(device);
     const testBytes = await generateTestPage(shop.name, device.name, { summary: abilities.source === 'unverified' ? 'not verified yet (treated as black & white, one-sided)' : abilities.summary, mode: device.color ? 'colour' : 'black & white' });
     const docId = randomUUID(), orderId = randomUUID(), receipt = token();
@@ -395,10 +546,33 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const options = { color: device.color ? 'color' : 'bw', duplex: false, copies: 1, layout: 'single', range: '', file_name: 'SmartPrint_Diagnostic_Test.pdf', priority: 100 };
     await db.transaction(async tx => {
       await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [docId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
-      await tx.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid','queued',$11)", [orderId, shop.id, docId, digest(receipt), JSON.stringify(options), 1, 1, 1, 0, 'cash', now()]);
+      await tx.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created,file_name,target_device_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid','queued',$11,$12,$13)", [orderId, shop.id, docId, digest(receipt), JSON.stringify(options), 1, 1, 1, 0, 'cash', now(), 'SmartPrint_Diagnostic_Test.pdf', device.id]);
       await audit(tx, req.user.id, 'device.test_printed', device.id);
     });
-    res.json({ ok: true, orderId, message: 'Test page queued for printer!' });
+    res.json({ ok: true, orderId, deviceId: device.id, deviceName: device.name, state: 'queued', message: `Test page queued specifically for ${device.name}. Waiting for Windows spooler acceptance...` });
+  });
+
+  app.get('/api/owner/devices/:id/test-print/:orderId', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [order] = await db.query(
+      'SELECT o.id, o.status, o.created, l.state AS lease_state, l.detail AS lease_detail FROM orders o LEFT JOIN print_leases l ON l.order_id=o.id WHERE o.id=$1 AND o.shop_id=$2 AND (o.target_device_id=$3 OR o.target_device_id IS NULL)',
+      [req.params.orderId, shop.id, req.params.id]
+    );
+    if (!order) throw fail(404, 'Test print job not found.');
+    const stage = order.status === 'completed' ? 'completed'
+      : order.status === 'failed' || order.status === 'needs_review' ? 'failed'
+      : order.status === 'awaiting_confirmation' || order.lease_state === 'awaiting_confirmation' ? 'spooler_accepted'
+      : order.lease_state === 'submitted' ? 'spooler_submitting'
+      : order.lease_state === 'claimed' ? 'claimed_by_connector'
+      : order.status === 'cancelled' ? 'cancelled'
+      : 'queued';
+    res.json({
+      orderId: order.id,
+      status: order.status,
+      leaseState: order.lease_state || null,
+      detail: order.lease_detail || null,
+      stage
+    });
   });
 
   app.post('/api/owner/print-job', owner, async (req, res) => {
@@ -556,8 +730,16 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     next();
   });
   app.post('/api/device/heartbeat', async (req, res) => {
+    const [shop] = await db.query('SELECT id, name FROM shops WHERE id=$1', [req.device.shop_id]);
+    const connId = req.body?.connectorId || req.device.connector_id;
+    if (connId) {
+      await db.query(
+        'UPDATE connectors SET last_heartbeat=$1, machine_name=COALESCE($2,machine_name), version=COALESCE($3,version) WHERE id=$4 AND shop_id=$5 AND status=$6',
+        [now(), req.body?.machineName || null, req.body?.version || null, String(connId).slice(0, 100), req.device.shop_id, 'active']
+      ).catch(() => {});
+    }
     // Respond immediately so device heartbeats are fast (<5ms) and never timeout
-    res.json({ ok: true });
+    res.json({ ok: true, shopId: req.device.shop_id, shopName: shop?.name || null });
     // Run cleanup asynchronously in background if overdue
     db.query("SELECT last_success FROM worker_status WHERE id='cleanup'").then(([worker]) => {
       if (!worker || Date.now() - Date.parse(worker.last_success) > 60000) {
@@ -575,9 +757,41 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const capabilities = req.body.capabilities;
     if (capabilities && typeof capabilities.color === 'boolean' && typeof capabilities.duplex === 'boolean') {
       await db.query("UPDATE devices SET color=$1, duplex=$2 WHERE id=$3 AND COALESCE(cap_source,'driver')<>'manual'", [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
-      // What the driver reported is always remembered, even when the owner's own choice is in force, so a setting that
-      // disagrees with the printer (colour printer set to black & white) can be shown to the owner and the admin.
-      await db.query('UPDATE devices SET det_color=$1, det_duplex=$2, det_at=$3 WHERE id=$4', [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, now(), req.device.id]);
+      const paperSizes = Array.isArray(capabilities.paperSizes) ? JSON.stringify(capabilities.paperSizes.slice(0, 12).map(s => String(s).slice(0, 40))) : null;
+      const resolutionDpi = Number.isInteger(Number(capabilities.resolutionDpi)) && Number(capabilities.resolutionDpi) > 0 ? Number(capabilities.resolutionDpi) : null;
+      await db.query('UPDATE devices SET det_color=$1, det_duplex=$2, det_at=$3, paper_sizes=COALESCE($4,paper_sizes), resolution_dpi=COALESCE($5,resolution_dpi) WHERE id=$6', [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, now(), paperSizes, resolutionDpi, req.device.id]);
+    }
+    const info = req.body.printerInfo;
+    const conn = req.body.connector;
+    if ((info && typeof info === 'object') || (conn && typeof conn === 'object')) {
+      await db.query(
+        'UPDATE devices SET port_name=COALESCE($1,port_name), driver_name=COALESCE($2,driver_name), connection_type=COALESCE($3,connection_type), is_default=COALESCE($4,is_default), queue_jobs=COALESCE($5,queue_jobs), machine_name=COALESCE($6,machine_name), connector_id=COALESCE($7,connector_id), connector_version=COALESCE($8,connector_version) WHERE id=$9',
+        [
+          info?.portName ? String(info.portName).slice(0, 120) : null,
+          info?.driverName ? String(info.driverName).slice(0, 150) : null,
+          info?.connectionType ? String(info.connectionType).slice(0, 60) : null,
+          typeof info?.isDefault === 'boolean' ? (info.isDefault ? 1 : 0) : null,
+          Number.isInteger(Number(info?.jobCount)) ? Number(info.jobCount) : null,
+          conn?.machineName ? String(conn.machineName).slice(0, 100) : null,
+          conn?.id ? String(conn.id).slice(0, 100) : null,
+          conn?.version ? String(conn.version).slice(0, 40) : null,
+          req.device.id
+        ]
+      );
+      if (conn?.id) {
+        const [existingConn] = await db.query('SELECT id, shop_id FROM connectors WHERE id=$1', [String(conn.id).slice(0, 100)]);
+        if (!existingConn) {
+          await db.query(
+            'INSERT INTO connectors (id, shop_id, machine_id, machine_name, version, status, last_heartbeat, last_scan, created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+            [String(conn.id).slice(0, 100), req.device.shop_id, conn.machineId ? String(conn.machineId).slice(0, 120) : null, conn.machineName ? String(conn.machineName).slice(0, 100) : null, conn.version ? String(conn.version).slice(0, 40) : null, 'active', now(), now(), now()]
+          ).catch(() => {});
+        } else if (existingConn.shop_id === req.device.shop_id) {
+          await db.query(
+            'UPDATE connectors SET last_scan=$1, last_heartbeat=$1, machine_name=COALESCE($2,machine_name), version=COALESCE($3,version) WHERE id=$4 AND shop_id=$5',
+            [now(), conn.machineName ? String(conn.machineName).slice(0, 100) : null, conn.version ? String(conn.version).slice(0, 40) : null, existingConn.id, req.device.shop_id]
+          ).catch(() => {});
+        }
+      }
     }
     // What Windows says the printer itself is doing. The server classifies the raw spooler status itself, so a
     // connector (or anything holding its key) cannot invent a state name; "code: null" means Windows could not say.
@@ -666,6 +880,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       }).filter(c => c.options);
       parsed.sort((a, b) => ((b.options.priority || 0) - (a.options.priority || 0)) || a.order.created.localeCompare(b.order.created));
       for (const { order, options } of parsed) {
+        if (order.target_device_id && order.target_device_id !== req.device.id) continue;
         // An incompatible job stays queued for a capable printer; it is never "only job, print anyway".
         if (!printerSupports(device, options)) { skipped.push({ id: order.id, options }); continue; }
         const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);

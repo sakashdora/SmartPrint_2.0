@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID, createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import { mkdir, writeFile, unlink, readdir, stat } from 'node:fs/promises';
 import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus, clearStaleConnectorJobs } from './sumatra-helper.js';
+import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus, clearStaleConnectorJobs, setDefaultWindowsPrinter } from './sumatra-helper.js';
 import { probePrinterCapabilities, classifyConnection, guessCapabilities, detectManufacturer } from '../server/printer-capabilities.js';
 import { startBridge, BRIDGE_PORT } from './local-bridge.js';
 import { classifyPrinterHealth } from '../server/printer-health.js';
@@ -55,6 +57,16 @@ export function loadConfig() {
 const saveConfig = cfg => writeFile(settingsPath, JSON.stringify(cfg, null, 2), 'utf8');
 
 let config = normalizeConfig(loadConfig());
+const CONNECTOR_VERSION = '3.1.0';
+const machineName = hostname();
+const machineId = createHash('sha256').update(`${machineName}|${process.platform}|${process.arch}`).digest('hex').slice(0, 24);
+if (!config.ConnectorId) {
+  config = { ...config, ConnectorId: randomUUID() };
+  await saveConfig(config).catch(() => {});
+}
+const connectorId = config.ConnectorId;
+let shopId = config.ShopId || null;
+let shopName = config.ShopName || null;
 let base = (process.env.SMARTPRINT_URL || config.Url || 'http://localhost:3000').replace(/\/+$/, '');
 const processorSecret = process.env.PROCESSOR_SECRET || config.ProcessorSecret;
 
@@ -101,7 +113,15 @@ function makeWorker(name, token) {
     // With several printers on this PC a job must print on exactly the printer it was queued for.
     print: args => printPdfToWindowsPrinter({ ...args, sumatraPath: sumatra, strict: workers.size > 1 }),
     getHealth: () => worker.health ?? null,
-    refreshToken: () => tokenFromSettings(name)
+    refreshToken: () => tokenFromSettings(name),
+    onHeartbeat: res => {
+      if (res?.shopId && (res.shopId !== shopId || res.shopName !== shopName)) {
+        shopId = res.shopId;
+        shopName = res.shopName || shopName;
+        const cur = normalizeConfig(loadConfig());
+        saveConfig({ ...cur, ShopId: shopId, ShopName: shopName }).catch(() => {});
+      }
+    }
   });
   return worker;
 }
@@ -137,23 +157,61 @@ if (!workers.size) log('[Connector] Not linked yet. Open SmartPrint > Printers o
 // ---- this PC's printers, for the Printers page ---------------------------------------------------------------------
 // Real printers with driver-verified capabilities. Software printers (PDF, OneNote, PaperPort ...) are left out.
 // Cached briefly because the page polls it.
-let lastScan = { at: 0, list: [] };
-async function collectLocalPrinters({ maxAge = 15000 } = {}) {
+let lastScan = { at: 0, list: [], error: null };
+async function collectLocalPrinters({ maxAge = 15000, includeVirtual = false } = {}) {
   if (process.platform !== 'win32') return [];
-  if (Date.now() - lastScan.at < maxAge) return lastScan.list;
-  const rawWindows = await getWindowsPrinters();
+  if (Date.now() - lastScan.at < maxAge && !includeVirtual) return lastScan.list;
+  let rawWindows = [];
+  try {
+    rawWindows = await getWindowsPrinters();
+    lastScan.error = null;
+  } catch (err) {
+    lastScan.error = err.message || 'Windows printer scan failed.';
+    return lastScan.list;
+  }
   const printers = [];
+  const driverCounts = new Map();
   for (const p of rawWindows) {
     if (!p || !p.Name) continue;
     const port = String(p.PortName || '').trim(), name = String(p.Name).trim(), driver = String(p.DriverName || name).trim();
-    const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver });
-    if (connType === 'Virtual / PDF') continue;
+    const { kind: connectionKind, connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver, shared: Boolean(p.Shared) });
+    const isVirtual = connectionKind === 'virtual';
+    if (isVirtual && !includeVirtual) continue;
+    if (!isVirtual) driverCounts.set(driver.toLowerCase(), (driverCounts.get(driver.toLowerCase()) || 0) + 1);
     const health = classifyPrinterHealth(p.PrinterStatus ?? null, { usbPresent: typeof p.UsbPresent === 'boolean' ? p.UsbPresent : null, workOffline: p.WorkOffline === true });
-    printers.push({ name, portName: port, driverName: driver, manufacturer: detectManufacturer(name, driver), connectionType: connType, isWifi, isWired, isDefault: Boolean(p.Default), status: health.blocking ? 'Offline' : checkPrinterStatus(p.PrinterStatus).status, windowsState: health.state, windowsStateLabel: health.label, windowsBlocking: health.blocking, usbPresent: typeof p.UsbPresent === 'boolean' ? p.UsbPresent : null, ...guessCapabilities(name, driver), verified: false });
+    printers.push({
+      name,
+      portName: port,
+      portMonitor: String(p.PortMonitor || '').trim() || null,
+      printerHostAddress: String(p.PrinterHostAddress || '').trim() || null,
+      driverName: driver,
+      manufacturer: detectManufacturer(name, driver),
+      connectionKind,
+      connectionType: connType,
+      isWifi,
+      isWired,
+      isVirtual,
+      shared: Boolean(p.Shared),
+      shareName: String(p.ShareName || '').trim() || null,
+      jobCount: Number(p.JobCount) || 0,
+      isDefault: Boolean(p.Default),
+      status: health.blocking ? 'Offline' : checkPrinterStatus(p.PrinterStatus).status,
+      windowsState: health.state,
+      windowsStateLabel: health.label,
+      windowsBlocking: health.blocking,
+      usbPresent: typeof p.UsbPresent === 'boolean' ? p.UsbPresent : null,
+      ...guessCapabilities(name, driver),
+      paperSizes: [],
+      resolutionDpi: null,
+      verified: false
+    });
   }
-  const capabilities = await probePrinterCapabilities(printers.map(p => p.name));
+  for (const p of printers) {
+    p.duplicateDriverCount = p.isVirtual ? 1 : (driverCounts.get(p.driverName.toLowerCase()) || 1);
+  }
+  const capabilities = await probePrinterCapabilities(printers.filter(p => !p.isVirtual).map(p => p.name));
   for (const p of printers) if (capabilities.has(p.name)) Object.assign(p, capabilities.get(p.name), { verified: true });
-  lastScan = { at: Date.now(), list: printers };
+  if (!includeVirtual) lastScan = { at: Date.now(), list: printers, error: null };
   return printers;
 }
 
@@ -213,8 +271,24 @@ async function scanAndReportLocalPrinters() {
       const verdict = classifyPrinterHealth(code, { usbPresent, workOffline });
       worker.health = { blocking: verdict.blocking, label: verdict.label, state: verdict.state, at: Date.now() };
       const caps = capabilities.get(worker.name);
+      const printerInfo = own ? {
+        portName: String(own.PortName || '').trim(),
+        driverName: String(own.DriverName || '').trim(),
+        connectionType: classifyConnection({ name: own.Name, port: own.PortName, driver: own.DriverName, shared: Boolean(own.Shared) }).connectionType,
+        isDefault: Boolean(own.Default),
+        jobCount: Number(own.JobCount) || 0
+      } : null;
       // Always report: "Windows could not tell us" is itself the honest answer.
-      await worker.request('/api/device/printers/scanned', { method: 'POST', body: { printers: first ? printers : [], health: { code, usbPresent, workOffline }, ...(caps ? { capabilities: caps } : {}) } }).catch(() => {});
+      await worker.request('/api/device/printers/scanned', {
+        method: 'POST',
+        body: {
+          printers: first ? printers : [],
+          health: { code, usbPresent, workOffline },
+          connector: { id: connectorId, version: CONNECTOR_VERSION, machineName },
+          ...(printerInfo ? { printerInfo } : {}),
+          ...(caps ? { capabilities: caps } : {})
+        }
+      }).catch(() => {});
       first = false;
     }
   } catch {}
@@ -225,10 +299,18 @@ let driverCache = { at: 0, list: [] };
 // ---- dashboard link (this PC only) ---------------------------------------------------------------------------------
 // Links ONE printer to the server. The key is checked with the server before anything is saved; printers that are
 // already linked keep working. Linking to a different server replaces them, because they belonged to the old one.
-async function pair({ url, token, printer: chosen }) {
+async function pair({ url, token, printer: chosen, shopId: reqShopId = null, shopName: reqShopName = null }) {
   const target = url.replace(/\/+$/, '');
-  const check = await fetch(new URL('/api/device/heartbeat', target), { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) }).catch(err => ({ ok: false, status: err.message }));
+  const check = await fetch(new URL('/api/device/heartbeat', target), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connectorId, machineName, version: CONNECTOR_VERSION }),
+    signal: AbortSignal.timeout(20000)
+  }).catch(err => ({ ok: false, status: err.message }));
   if (!check.ok) throw Object.assign(new Error(`The SmartPrint server did not accept this device key (${check.status}).`), { status: 400 });
+  const beatData = await check.json().catch(() => ({}));
+  const resolvedShopId = beatData.shopId || reqShopId || null;
+  const resolvedShopName = beatData.shopName || reqShopName || null;
   let name = String(chosen || '').trim();
   if (!name) throw Object.assign(new Error('Choose a printer to connect.'), { status: 400 });
   if (process.platform === 'win32') {
@@ -237,19 +319,25 @@ async function pair({ url, token, printer: chosen }) {
     if (exact) name = exact.Name;
     else if (installed.length) throw Object.assign(new Error(`"${name}" is not installed in Windows on this PC. Install its driver, then click Scan again.`), { status: 400 });
   }
-  config = upsertPrinter(loadConfig(), { url: target, name, token });
+  config = upsertPrinter(loadConfig(), { url: target, name, token, shopId: resolvedShopId, shopName: resolvedShopName });
   await saveConfig(config);
-  if (target !== base) { for (const w of workers.values()) await w.stop(); workers.clear(); }
+  if (target !== base || (shopId && resolvedShopId && shopId !== resolvedShopId)) {
+    for (const w of workers.values()) await w.stop();
+    workers.clear();
+  }
   base = target;
+  shopId = resolvedShopId;
+  shopName = resolvedShopName;
   const previous = workers.get(keyOf(name));
   if (previous) await previous.stop();
   const worker = makeWorker(name, token);
+  worker.lastHeartbeatAt = Date.now();
   workers.set(keyOf(name), worker);
   worker.start();
   lastScan.at = 0;
-  log(`[Connector] Linked "${name}" from the dashboard to ${target}. Printers on this PC: ${workers.size}.`);
+  log(`[Connector] Linked "${name}" from the dashboard to ${target}${shopName ? ` (${shopName})` : ''}. Printers on this PC: ${workers.size}.`);
   scanAndReportLocalPrinters().catch(() => {});
-  return { printer: name };
+  return { printer: name, shopId, shopName };
 }
 
 async function unpair({ printer: name }) {
@@ -259,6 +347,18 @@ async function unpair({ printer: name }) {
   await saveConfig(config);
   log(`[Connector] Disconnected "${name}" from this PC's connector. Printers left: ${workers.size}.`);
   return { printer: name, remaining: workers.size };
+}
+
+async function release() {
+  for (const w of workers.values()) await w.stop();
+  workers.clear();
+  const prevShop = shopName || base;
+  shopId = null;
+  shopName = null;
+  config = normalizeConfig({ ...loadConfig(), Printers: [], ShopId: null, ShopName: null, Token: '', Printer: '', LastUpdated: new Date().toISOString() });
+  await saveConfig(config);
+  log(`[Connector] Released connector ownership from ${prevShop}. Ready for pairing.`);
+  return { released: true };
 }
 
 log('============================================================');
@@ -272,10 +372,37 @@ try {
   await startBridge({
     state: () => {
       const list = [...workers.values()];
-      return { base, linked: list.some(w => !w.authFailed), needsRelink: list.length > 0 && list.every(w => w.authFailed), printer: list[0]?.name ?? '', linkedPrinters: list.map(w => ({ name: w.name, authFailed: w.authFailed })) };
+      const latestBeat = list.reduce((max, w) => Math.max(max, w.lastHeartbeatAt || 0), 0);
+      return {
+        base,
+        connectorId,
+        connectorVersion: CONNECTOR_VERSION,
+        machineId,
+        machineName,
+        shopId,
+        shopName,
+        lastHeartbeatAt: latestBeat ? new Date(latestBeat).toISOString() : null,
+        lastScanAt: lastScan.at ? new Date(lastScan.at).toISOString() : null,
+        lastScanError: lastScan.error,
+        linked: list.some(w => !w.authFailed),
+        needsRelink: list.length > 0 && list.every(w => w.authFailed),
+        printer: list[0]?.name ?? '',
+        linkedPrinters: list.map(w => ({ name: w.name, authFailed: w.authFailed }))
+      };
     },
-    printers: ({ fresh } = {}) => collectLocalPrinters({ maxAge: fresh ? 0 : 15000 }),
-    pair, unpair,
+    printers: ({ fresh, includeVirtual } = {}) => collectLocalPrinters({ maxAge: fresh ? 0 : 15000, includeVirtual }),
+    pair, unpair, release,
+    setDefault: async ({ printer }) => {
+      await setDefaultWindowsPrinter(printer);
+      lastScan.at = 0;
+      await scanAndReportLocalPrinters().catch(() => {});
+    },
+    refresh: async () => {
+      lastScan.at = 0;
+      const list = await collectLocalPrinters({ maxAge: 0 });
+      await scanAndReportLocalPrinters().catch(() => {});
+      return { printers: list, lastScanAt: lastScan.at ? new Date(lastScan.at).toISOString() : null };
+    },
     // Installed drivers with their maker, cached for a minute (listing them takes a second or two).
     drivers: async () => {
       if (Date.now() - driverCache.at > 60000) driverCache = { at: Date.now(), list: await listInstalledDrivers() };
